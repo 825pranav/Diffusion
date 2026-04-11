@@ -1,0 +1,80 @@
+"""
+GitHub async Kafka producer.
+
+Polls the GitHub Events API for public events (WatchEvent, ForkEvent,
+PushEvent) and publishes them to the `gh-raw` Kafka topic.
+"""
+
+import asyncio
+import json
+import os
+from datetime import datetime, timezone
+
+import aiohttp
+from aiokafka import AIOKafkaProducer
+
+KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
+TOPIC = "gh-raw"
+GH_TOKEN = os.getenv("GITHUB_TOKEN", "")
+POLL_INTERVAL = int(os.getenv("GH_POLL_INTERVAL", "60"))  # seconds
+
+TRACKED_EVENT_TYPES = {"WatchEvent", "ForkEvent", "PushEvent", "CreateEvent"}
+
+_HEADERS = {
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    **({"Authorization": f"Bearer {GH_TOKEN}"} if GH_TOKEN else {}),
+}
+
+
+def _serialize_event(event: dict) -> dict:
+    return {
+        "id": event["id"],
+        "type": event["type"],
+        "platform": "github",
+        "repo": event["repo"]["name"],
+        "actor": event["actor"]["login"],
+        "created_at": event.get("created_at"),
+        "payload_action": event.get("payload", {}).get("action"),
+        "ingested_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def produce(
+    session: aiohttp.ClientSession,
+    producer: AIOKafkaProducer,
+    seen: set,
+) -> None:
+    url = "https://api.github.com/events?per_page=100"
+    async with session.get(url, headers=_HEADERS) as resp:
+        resp.raise_for_status()
+        events: list[dict] = await resp.json()
+
+    for event in events:
+        if event["type"] not in TRACKED_EVENT_TYPES:
+            continue
+        if event["id"] in seen:
+            continue
+        payload = json.dumps(_serialize_event(event)).encode()
+        await producer.send_and_wait(TOPIC, payload)
+        seen.add(event["id"])
+
+    if len(seen) > 10_000:
+        seen.difference_update(list(seen)[:5000])
+
+
+async def main() -> None:
+    producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BROKER)
+    await producer.start()
+    seen: set[str] = set()
+    try:
+        async with aiohttp.ClientSession() as session:
+            while True:
+                await produce(session, producer, seen)
+                await asyncio.sleep(POLL_INTERVAL)
+    finally:
+        await producer.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
