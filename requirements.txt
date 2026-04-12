@@ -1,0 +1,35 @@
+# Ingestion
+praw==7.7.1
+aiokafka==0.10.0
+aiohttp==3.9.5
+
+# Stream processing
+kafka-python==2.0.2
+
+# Database
+asyncpg==0.29.0
+pgvector==0.3.2
+sqlalchemy[asyncio]==2.0.30
+
+# Embeddings
+sentence-transformers==3.0.1
+
+# Agent
+llama-index-core==0.10.52
+llama-index-llms-groq==0.1.4
+llama-index-llms-ollama==0.1.5
+llama-index-embeddings-huggingface==0.2.2
+
+# Evaluation
+ragas==0.1.14
+datasets==2.20.0
+
+# API
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+websockets==12.0
+
+# Utilities
+python-dotenv==1.0.1
+structlog==24.2.0
+tenacity==8.3.0
