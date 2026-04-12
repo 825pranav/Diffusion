@@ -1,8 +1,11 @@
 """
 Reddit async Kafka producer.
 
-Streams new submissions and comments from subreddits via PRAW,
+Streams new submissions from subreddits via PRAW's built-in stream API,
 serializes them, and publishes to the `reddit-raw` Kafka topic.
+
+PRAW's stream handles deduplication internally — only genuinely new
+submissions are yielded, so no seen-set is required here.
 """
 
 import asyncio
@@ -11,6 +14,7 @@ import os
 from datetime import datetime, timezone
 
 import praw
+import praw.models
 from aiokafka import AIOKafkaProducer
 
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
@@ -42,23 +46,37 @@ def _serialize_submission(submission: praw.models.Submission) -> dict:
     }
 
 
-async def produce(producer: AIOKafkaProducer, reddit: praw.Reddit) -> None:
+def _stream_submissions(reddit: praw.Reddit):
+    """Blocking generator — runs in a thread via run_in_executor."""
     subreddit = reddit.subreddit("+".join(SUBREDDITS))
-    loop = asyncio.get_event_loop()
-
-    for submission in await loop.run_in_executor(None, lambda: list(subreddit.new(limit=None))):
-        payload = json.dumps(_serialize_submission(submission)).encode()
-        await producer.send_and_wait(TOPIC, payload)
+    # skip_existing=True skips the backlog of already-published posts on startup
+    yield from subreddit.stream.submissions(skip_existing=True, pause_after=None)
 
 
 async def main() -> None:
     reddit = _build_reddit_client()
     producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BROKER)
     await producer.start()
+
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+
+    def _fill_queue():
+        """Thread: push serialized payloads into the async queue."""
+        for submission in _stream_submissions(reddit):
+            if submission is None:
+                continue
+            payload = json.dumps(_serialize_submission(submission)).encode()
+            # Block the feeder thread if the queue is full (back-pressure).
+            asyncio.run_coroutine_threadsafe(queue.put(payload), loop).result()
+
+    # Run the blocking PRAW stream in a dedicated thread.
+    loop.run_in_executor(None, _fill_queue)
+
     try:
         while True:
-            await produce(producer, reddit)
-            await asyncio.sleep(30)
+            payload = await queue.get()
+            await producer.send_and_wait(TOPIC, payload)
     finally:
         await producer.stop()
 
