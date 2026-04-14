@@ -222,8 +222,8 @@ Open `http://localhost:3000` to view the dashboard.
 | Stage | Description | Status |
 |---|---|---|
 | 1 | Ingestion pipeline — Kafka producers for Reddit, HN, GitHub | ✅ Done |
-| 2 | Stream processing — dedup, entity extraction, anomaly detection | 🔲 In progress |
-| 3 | Graph + vector layer — PostgreSQL schema, pgvector embeddings | ⬜ Pending |
+| 2 | Stream processing — dedup, entity extraction, anomaly detection | ✅ Done |
+| 3 | Graph + vector layer — PostgreSQL schema, pgvector embeddings | 🔲 In progress |
 | 4 | Agent layer — LlamaIndex ReAct, tools, Ragas evaluation | ⬜ Pending |
 | 5 | API + frontend — FastAPI, WebSocket, SSE, Next.js dashboard | ⬜ Pending |
 | 6 | Benchmarks, end-to-end validation, performance profiling | ⬜ Pending |
