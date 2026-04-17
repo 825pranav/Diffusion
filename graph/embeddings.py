@@ -1,8 +1,8 @@
 """
 pgvector embedding layer.
 
-Handles generating and storing embeddings for graph nodes,
-and semantic similarity search against historical trends.
+Uses Ollama (nomic-embed-text) — already in the stack as the LLM fallback,
+so no new dependencies or accounts needed.
 """
 
 from __future__ import annotations
@@ -10,26 +10,19 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from openai import AsyncOpenAI
+import aiohttp
 
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 EMBEDDING_VERSION = os.getenv("EMBEDDING_VERSION", "v1")
-EMBEDDING_DIMS = 1536
-
-_client: AsyncOpenAI | None = None
+EMBEDDING_DIMS = 768
 
 
-def _get_client() -> AsyncOpenAI:
-    global _client
-    if _client is None:
-        _client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    return _client
-
-
-async def embed(text: str) -> list[float]:
-    resp = await _get_client().embeddings.create(
-        model=EMBEDDING_MODEL,
-        input=text,
-        dimensions=EMBEDDING_DIMS,
-    )
-    return resp.data[0].embedding
+async def embed(text: str, session: aiohttp.ClientSession) -> list[float]:
+    async with session.post(
+        f"{OLLAMA_URL}/api/embeddings",
+        json={"model": EMBEDDING_MODEL, "prompt": text},
+    ) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+    return data["embedding"]
