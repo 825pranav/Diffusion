@@ -26,3 +26,47 @@ async def embed(text: str, session: aiohttp.ClientSession) -> list[float]:
         resp.raise_for_status()
         data = await resp.json()
     return data["embedding"]
+
+
+async def store_embedding(
+    conn,
+    node_id: str,
+    platform: str,
+    text: str,
+    session: aiohttp.ClientSession,
+) -> None:
+    vector = await embed(text, session)
+    await conn.execute(
+        """
+        INSERT INTO trend_embeddings (node_id, platform, embedding, model_name, model_version)
+        VALUES ($1, $2, $3::vector, $4, $5)
+        """,
+        node_id, platform, str(vector), EMBEDDING_MODEL, EMBEDDING_VERSION,
+    )
+
+
+async def search_similar(
+    conn,
+    text: str,
+    session: aiohttp.ClientSession,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Return the closest stored trends by cosine similarity."""
+    vector = await embed(text, session)
+    rows = await conn.fetch(
+        """
+        SELECT
+            te.node_id,
+            te.platform,
+            n.label,
+            1 - (te.embedding <=> $1::vector) AS similarity
+        FROM trend_embeddings te
+        JOIN graph_nodes n ON n.id = te.node_id AND n.platform = te.platform
+        WHERE te.model_name    = $2
+          AND te.model_version = $3
+        ORDER BY te.embedding <=> $1::vector
+        LIMIT $4
+        """,
+        str(vector), EMBEDDING_MODEL, EMBEDDING_VERSION, limit,
+    )
+    return [dict(r) for r in rows]
