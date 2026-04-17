@@ -70,3 +70,36 @@ async def search_similar(
         str(vector), EMBEDDING_MODEL, EMBEDDING_VERSION, limit,
     )
     return [dict(r) for r in rows]
+
+
+async def embed_unindexed_nodes(
+    conn,
+    session: aiohttp.ClientSession,
+    node_types: tuple[str, ...] = ("named_entity", "repo", "content"),
+    batch_size: int = 50,
+) -> int:
+    """
+    Embed any graph_nodes that don't yet have a trend_embedding row.
+    Returns the number of nodes embedded.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT n.id, n.platform, n.label
+        FROM graph_nodes n
+        WHERE n.type = ANY($1::text[])
+          AND NOT EXISTS (
+              SELECT 1 FROM trend_embeddings te
+              WHERE te.node_id = n.id
+                AND te.platform = n.platform
+                AND te.model_name = $2
+                AND te.model_version = $3
+          )
+        LIMIT $4
+        """,
+        list(node_types), EMBEDDING_MODEL, EMBEDDING_VERSION, batch_size,
+    )
+
+    for row in rows:
+        await store_embedding(conn, row["id"], row["platform"], row["label"], session)
+
+    return len(rows)
