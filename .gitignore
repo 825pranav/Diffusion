@@ -67,3 +67,6 @@ yarn-error.log*
 
 # Claude Code context
 .claude/
+
+# Local session context (do not commit)
+context.txt
