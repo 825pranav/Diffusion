@@ -5,25 +5,53 @@ import os
 
 from aiokafka import AIOKafkaConsumer
 
+from processing.anomaly_detector import AnomalyDetector
 from processing.dedup import DedupFilter
-from processing.entity_extractor import extract_entities
+from processing.entity_extractor import Node, extract_entity_set
+from processing.velocity_scorer import VelocityScorer
 
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
 TOPICS = ["reddit-raw", "hn-raw", "gh-raw"]
 GROUP_ID = os.getenv("KAFKA_GROUP_ID", "diffusion-processor")
 
+# Entity types whose activity is meaningful to track for trend velocity.
+_VELOCITY_TYPES = {"named_entity", "repo"}
+
 log = logging.getLogger(__name__)
 
 
-async def handle(record: dict) -> None:
-    entities = extract_entities(record)
-    if entities:
-        log.info("extracted %d entities from %s/%s", len(entities), record.get("platform"), record.get("id"))
-    # downstream: graph writes + velocity scoring go here
+async def handle(
+    record: dict,
+    scorer: VelocityScorer,
+    detector: AnomalyDetector,
+) -> None:
+    platform = record.get("platform", "unknown")
+    es = extract_entity_set(record)
+    if not es.nodes:
+        return
+
+    log.info(
+        "extracted %d nodes %d edges from %s/%s",
+        len(es.nodes),
+        len(es.edges),
+        platform,
+        record.get("id"),
+    )
+
+    # Score velocity for trackable entity types and check for anomalies.
+    for node in es.nodes:
+        if node.type not in _VELOCITY_TYPES:
+            continue
+        vscore = scorer.record(node.id)
+        await detector.evaluate(vscore, platform=platform)
+
+    # TODO (Stage 3): write es.nodes and es.edges to the propagation graph.
 
 
 async def main() -> None:
     dedup = DedupFilter()
+    scorer = VelocityScorer()
+    detector = AnomalyDetector()
     consumer = AIOKafkaConsumer(
         *TOPICS,
         bootstrap_servers=KAFKA_BROKER,
@@ -40,11 +68,12 @@ async def main() -> None:
             if not dedup.is_new(record):
                 continue
             try:
-                await handle(record)
+                await handle(record, scorer, detector)
             except Exception:
                 log.exception("error processing record %s", record.get("id"))
     finally:
         await consumer.stop()
+        await detector.close()
 
 
 if __name__ == "__main__":
