@@ -1,0 +1,190 @@
+"""
+LlamaIndex ReAct agent for anomaly investigation.
+
+Wakes via PostgreSQL LISTEN/NOTIFY on 'anomaly_detected'.
+For each anomaly event the agent:
+  1. Runs a bounded ReAct loop with the three investigation tools
+  2. Applies the confidence gate (< 0.65 → needs_review, withheld from feed)
+  3. Scores the output with Ragas
+  4. Writes a structured case file to PostgreSQL
+  5. Marks the anomaly event as investigated
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+from datetime import datetime, timezone
+
+import aiohttp
+import asyncpg
+from llama_index.core.agent import ReActAgent
+from llama_index.core.llms import LLM
+
+from agent.confidence import apply_gate
+from agent.evaluator import evaluate_case
+from agent.tools import build_tools
+from graph import embeddings as emb
+from graph.models import ANOMALY_NOTIFY_CHANNEL
+from graph.queries import mark_anomaly_investigated
+
+DB_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/diffusion")
+MAX_AGENT_STEPS = int(os.getenv("AGENT_MAX_STEPS", "10"))
+
+log = logging.getLogger(__name__)
+
+_INVESTIGATION_PROMPT = (
+    "You are an intelligence analyst investigating how a trending topic spread online.\n"
+    "Use get_propagation_path, search_similar_trends, and classify_virality to gather evidence.\n"
+    "After your investigation respond with ONLY a JSON object in this exact format:\n"
+    "{\n"
+    '  "classification": "organic" | "coordinated_amplification" | "uncertain",\n'
+    '  "confidence": <float 0.0-1.0>,\n'
+    '  "signals": ["signal 1", "signal 2"],\n'
+    '  "reasoning_steps": ["step 1", "step 2"]\n'
+    "}"
+)
+
+
+def _build_llm() -> LLM:
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    if groq_key:
+        from llama_index.llms.groq import Groq
+        log.info("LLM: Groq (llama-3.3-70b-versatile)")
+        return Groq(model="llama-3.3-70b-versatile", api_key=groq_key)
+    from llama_index.llms.ollama import Ollama
+    chat_model = os.getenv("OLLAMA_CHAT_MODEL", "llama3.2")
+    log.info("LLM: Ollama fallback (%s)", chat_model)
+    return Ollama(
+        model=chat_model,
+        base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
+        request_timeout=120.0,
+    )
+
+
+def _parse_agent_response(raw: str) -> dict:
+    """Strip markdown fences and parse JSON from the agent's final response."""
+    text = raw.strip()
+    if "```" in text:
+        # take the content between the first pair of fences
+        parts = text.split("```")
+        text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start != -1 and end > start:
+        text = text[start:end]
+    return json.loads(text)
+
+
+async def investigate(
+    conn: asyncpg.Connection,
+    session: aiohttp.ClientSession,
+    event: dict,
+) -> None:
+    node_id: str = event.get("node_id", "")
+    platform: str = event.get("platform", "")
+    anomaly_id: int | None = event.get("id")
+
+    log.info(
+        "investigating anomaly %s — node=%s platform=%s z=%.2f",
+        anomaly_id, node_id, platform, event.get("z_score", 0.0),
+    )
+
+    tools = build_tools(conn, session)
+    agent = ReActAgent.from_tools(tools, llm=_build_llm(), max_iterations=MAX_AGENT_STEPS, verbose=False)
+
+    query = (
+        f"{_INVESTIGATION_PROMPT}\n\n"
+        f"Investigate node '{node_id}' on platform '{platform}'. "
+        f"Z-score: {event.get('z_score', 0.0):.2f}, velocity: {event.get('velocity', 0.0):.2f}."
+    )
+
+    try:
+        response = await agent.aquery(query)
+        result = _parse_agent_response(str(response))
+    except Exception:
+        log.exception("agent failed to produce valid output for anomaly %s", anomaly_id)
+        result = {"classification": "uncertain", "confidence": 0.0, "signals": [], "reasoning_steps": []}
+
+    classification: str = result.get("classification", "uncertain")
+    confidence: float = float(result.get("confidence", 0.0))
+    signals: list = result.get("signals", [])
+    reasoning_steps: list = result.get("reasoning_steps", [])
+
+    _, needs_review = apply_gate(confidence)
+
+    similar = await emb.search_similar(conn, node_id, session, limit=3)
+
+    ragas_scores = await evaluate_case(
+        trend=node_id,
+        classification=classification,
+        signals=signals,
+        similar_cases=similar,
+        reasoning_steps=reasoning_steps,
+    )
+
+    await conn.execute(
+        """
+        INSERT INTO case_files (
+            anomaly_event_id, trend, platform_origin, detected_at,
+            classification, confidence, signals, similar_past_cases,
+            ragas_scores, agent_reasoning_steps, needs_review
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11)
+        """,
+        anomaly_id,
+        node_id,
+        platform,
+        datetime.now(timezone.utc),
+        classification,
+        confidence,
+        json.dumps(signals),
+        json.dumps(similar),
+        json.dumps(ragas_scores),
+        len(reasoning_steps),
+        needs_review,
+    )
+
+    if anomaly_id is not None:
+        await mark_anomaly_investigated(conn, anomaly_id)
+
+    log.info(
+        "case file written — node=%s classification=%s confidence=%.2f needs_review=%s",
+        node_id, classification, confidence, needs_review,
+    )
+
+
+async def main() -> None:
+    pool = await asyncpg.create_pool(DB_URL, min_size=2, max_size=5)
+    notify_conn = await asyncpg.connect(DB_URL)
+    queue: asyncio.Queue[dict] = asyncio.Queue()
+
+    def _on_notify(_conn, _pid, _channel, payload: str) -> None:
+        try:
+            event = json.loads(payload)
+            asyncio.get_event_loop().call_soon_threadsafe(queue.put_nowait, event)
+        except json.JSONDecodeError:
+            log.warning("non-JSON notify payload: %.200s", payload)
+
+    await notify_conn.add_listener(ANOMALY_NOTIFY_CHANNEL, _on_notify)
+    log.info("agent listening on channel '%s'", ANOMALY_NOTIFY_CHANNEL)
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            while True:
+                event = await queue.get()
+                async with pool.acquire() as conn:
+                    try:
+                        await investigate(conn, session, event)
+                    except Exception:
+                        log.exception("investigation failed for event %s", event.get("id"))
+    finally:
+        await notify_conn.remove_listener(ANOMALY_NOTIFY_CHANNEL, _on_notify)
+        await notify_conn.close()
+        await pool.close()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    asyncio.run(main())
