@@ -1,6 +1,7 @@
 import os
 from contextlib import asynccontextmanager
 
+import aiohttp
 import asyncpg
 from fastapi import FastAPI
 
@@ -10,7 +11,9 @@ DB_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.db = await asyncpg.create_pool(DB_URL, min_size=2, max_size=10)
+    app.state.http = aiohttp.ClientSession()
     yield
+    await app.state.http.close()
     await app.state.db.close()
 
 
