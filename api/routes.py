@@ -58,3 +58,52 @@ async def node_propagation(
     if not edges:
         raise HTTPException(status_code=404, detail="node not found or no edges")
     return {"node_id": node_id, "edges": edges}
+
+
+# ── anomalies ─────────────────────────────────────────────────────────────────
+
+@router.get("/anomalies")
+async def list_anomalies(
+    request: Request,
+    investigated: bool | None = None,
+    platform: str | None = None,
+    limit: int = Query(20, le=100),
+    offset: int = 0,
+):
+    """List anomaly events with optional filters."""
+    filters, args = [], []
+
+    if investigated is not None:
+        args.append(investigated)
+        filters.append(f"investigated = ${len(args)}")
+    if platform is not None:
+        args.append(platform)
+        filters.append(f"platform = ${len(args)}")
+
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    args += [limit, offset]
+
+    async with request.app.state.db.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT id, node_id, platform, z_score, velocity, detected_at, investigated
+            FROM anomaly_events
+            {where}
+            ORDER BY detected_at DESC
+            LIMIT ${len(args) - 1} OFFSET ${len(args)}
+            """,
+            *args,
+        )
+    return [dict(r) for r in rows]
+
+
+@router.get("/anomalies/{anomaly_id}")
+async def get_anomaly(anomaly_id: int, request: Request):
+    """Single anomaly event by id."""
+    async with request.app.state.db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM anomaly_events WHERE id = $1", anomaly_id
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="anomaly not found")
+    return dict(row)
