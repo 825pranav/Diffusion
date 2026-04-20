@@ -107,3 +107,53 @@ async def get_anomaly(anomaly_id: int, request: Request):
     if not row:
         raise HTTPException(status_code=404, detail="anomaly not found")
     return dict(row)
+
+
+# ── case files ────────────────────────────────────────────────────────────────
+
+@router.get("/case-files")
+async def list_case_files(
+    request: Request,
+    needs_review: bool | None = None,
+    classification: str | None = None,
+    limit: int = Query(20, le=100),
+    offset: int = 0,
+):
+    """List case files. Filter by needs_review or classification."""
+    filters, args = [], []
+
+    if needs_review is not None:
+        args.append(needs_review)
+        filters.append(f"needs_review = ${len(args)}")
+    if classification is not None:
+        args.append(classification)
+        filters.append(f"classification = ${len(args)}")
+
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    args += [limit, offset]
+
+    async with request.app.state.db.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT id, anomaly_event_id, trend, platform_origin, detected_at,
+                   classification, confidence, needs_review, created_at
+            FROM case_files
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ${len(args) - 1} OFFSET ${len(args)}
+            """,
+            *args,
+        )
+    return [dict(r) for r in rows]
+
+
+@router.get("/case-files/{case_id}")
+async def get_case_file(case_id: int, request: Request):
+    """Full case file including signals, ragas scores, and similar past cases."""
+    async with request.app.state.db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM case_files WHERE id = $1", case_id
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="case file not found")
+    return dict(row)
