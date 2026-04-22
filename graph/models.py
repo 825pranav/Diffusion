@@ -105,6 +105,24 @@ CREATE_INDEXES = [
 # the agent process wakes on receive.
 ANOMALY_NOTIFY_CHANNEL = "anomaly_detected"
 
+# Postgres LISTEN/NOTIFY channel — fires on every graph_edges INSERT;
+# the WebSocket listener fans the payload out to connected clients.
+GRAPH_DELTA_CHANNEL = "graph_delta"
+
+CREATE_GRAPH_DELTA_TRIGGER = """
+CREATE OR REPLACE FUNCTION notify_graph_delta() RETURNS trigger AS $$
+BEGIN
+    PERFORM pg_notify('graph_delta', row_to_json(NEW)::text);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_graph_delta ON graph_edges;
+CREATE TRIGGER trg_graph_delta
+    AFTER INSERT ON graph_edges
+    FOR EACH ROW EXECUTE FUNCTION notify_graph_delta();
+"""
+
 CREATE_ANOMALY_NOTIFY_TRIGGER = """
 CREATE OR REPLACE FUNCTION notify_anomaly() RETURNS trigger AS $$
 BEGIN
@@ -129,6 +147,7 @@ _DDL_STATEMENTS = [
     CREATE_ANOMALY_EVENTS_TABLE,
     CREATE_CASE_FILES_TABLE,
     *CREATE_INDEXES,
+    CREATE_GRAPH_DELTA_TRIGGER,
     CREATE_ANOMALY_NOTIFY_TRIGGER,
 ]
 
