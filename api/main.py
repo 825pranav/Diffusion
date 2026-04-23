@@ -9,7 +9,9 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from agent.agent import agent_listener
 from api.routes import router
+from api.sse import publish as sse_publish, router as sse_router
 from api.websocket import graph_delta_listener, router as ws_router
 
 DB_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5432/diffusion")
@@ -18,13 +20,21 @@ CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
+def _make_emit(anomaly_id: int):
+    async def emit(event):
+        await sse_publish(anomaly_id, event)
+    return emit
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.db = await asyncpg.create_pool(DB_URL, min_size=2, max_size=10)
     app.state.http = aiohttp.ClientSession()
-    listener_task = asyncio.create_task(graph_delta_listener())
+    delta_task = asyncio.create_task(graph_delta_listener())
+    agent_task = asyncio.create_task(agent_listener(emit_factory=_make_emit))
     yield
-    listener_task.cancel()
+    agent_task.cancel()
+    delta_task.cancel()
     await app.state.http.close()
     await app.state.db.close()
 
@@ -52,3 +62,4 @@ async def health():
 
 app.include_router(router)
 app.include_router(ws_router)
+app.include_router(sse_router)
