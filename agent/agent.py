@@ -17,6 +17,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from typing import Awaitable, Callable
 
 import aiohttp
 import asyncpg
@@ -34,6 +35,8 @@ DB_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:543
 MAX_AGENT_STEPS = int(os.getenv("AGENT_MAX_STEPS", "10"))
 
 log = logging.getLogger(__name__)
+
+Emitter = Callable[[dict | None], Awaitable[None]]
 
 _INVESTIGATION_PROMPT = (
     "You are an intelligence analyst investigating how a trending topic spread online.\n"
@@ -68,7 +71,6 @@ def _parse_agent_response(raw: str) -> dict:
     """Strip markdown fences and parse JSON from the agent's final response."""
     text = raw.strip()
     if "```" in text:
-        # take the content between the first pair of fences
         parts = text.split("```")
         text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
     start = text.find("{")
@@ -82,6 +84,7 @@ async def investigate(
     conn: asyncpg.Connection,
     session: aiohttp.ClientSession,
     event: dict,
+    emit: Emitter | None = None,
 ) -> None:
     node_id: str = event.get("node_id", "")
     platform: str = event.get("platform", "")
@@ -92,7 +95,16 @@ async def investigate(
         anomaly_id, node_id, platform, event.get("z_score", 0.0),
     )
 
-    tools = build_tools(conn, session)
+    if emit:
+        await emit({
+            "type": "started",
+            "node_id": node_id,
+            "platform": platform,
+            "z_score": event.get("z_score", 0.0),
+            "velocity": event.get("velocity", 0.0),
+        })
+
+    tools = build_tools(conn, session, emit=emit)
     agent = ReActAgent.from_tools(tools, llm=_build_llm(), max_iterations=MAX_AGENT_STEPS, verbose=False)
 
     query = (
@@ -154,8 +166,22 @@ async def investigate(
         node_id, classification, confidence, needs_review,
     )
 
+    if emit:
+        await emit({
+            "type": "completed",
+            "classification": classification,
+            "confidence": confidence,
+            "needs_review": needs_review,
+        })
+        await emit(None)
 
-async def main() -> None:
+
+async def agent_listener(emit_factory: Callable[[int], Emitter] | None = None) -> None:
+    """
+    Background coroutine — LISTENs on 'anomaly_detected' and runs investigations.
+    Can be embedded in the API lifespan or run standalone via main().
+    emit_factory(anomaly_id) returns an emit callable for SSE streaming; pass None to disable.
+    """
     pool = await asyncpg.create_pool(DB_URL, min_size=2, max_size=5)
     notify_conn = await asyncpg.connect(DB_URL)
     queue: asyncio.Queue[dict] = asyncio.Queue()
@@ -174,15 +200,25 @@ async def main() -> None:
         async with aiohttp.ClientSession() as session:
             while True:
                 event = await queue.get()
+                anomaly_id = event.get("id")
+                emit = (
+                    emit_factory(anomaly_id)
+                    if emit_factory and anomaly_id is not None
+                    else None
+                )
                 async with pool.acquire() as conn:
                     try:
-                        await investigate(conn, session, event)
+                        await investigate(conn, session, event, emit=emit)
                     except Exception:
-                        log.exception("investigation failed for event %s", event.get("id"))
+                        log.exception("investigation failed for event %s", anomaly_id)
     finally:
         await notify_conn.remove_listener(ANOMALY_NOTIFY_CHANNEL, _on_notify)
         await notify_conn.close()
         await pool.close()
+
+
+async def main() -> None:
+    await agent_listener()
 
 
 if __name__ == "__main__":
