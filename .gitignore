@@ -59,6 +59,7 @@ htmlcov/
 .ipynb_checkpoints/
 
 # Node (frontend)
+!frontend/src/lib/
 node_modules/
 .next/
 out/
@@ -70,3 +71,4 @@ yarn-error.log*
 
 # Local session context (do not commit)
 context.txt
+frontend_prompt.md
