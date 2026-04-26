@@ -1,10 +1,11 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useMemo } from "react";
+import { useMemo, useEffect } from "react";
 import { useGraphSocket, GraphNode, GraphEdge } from "@/hooks/useGraphSocket";
 import { useAnomalies } from "@/hooks/useAnomalies";
 import { makeNodeCanvasObject, PLATFORM_COLOR } from "@/lib/graphPaint";
+import { useConnection } from "@/components/ConnectionProvider";
 
 // react-force-graph-2d uses browser canvas APIs — no SSR
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
@@ -21,6 +22,11 @@ const LEGEND = [
 export default function LiveGraph() {
   const { nodes, edges, connected } = useGraphSocket();
   const anomalousIds = useAnomalies();
+  const { setConnected } = useConnection();
+
+  useEffect(() => {
+    setConnected(connected);
+  }, [connected, setConnected]);
 
   const graphData = useMemo(() => {
     const nodeArray: (GraphNode & { x?: number; y?: number })[] = Array.from(nodes.values());
