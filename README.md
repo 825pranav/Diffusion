@@ -215,6 +215,19 @@ Open `http://localhost:3000` to view the dashboard.
 - Kafka + Zookeeper → `localhost:9092`
 - PostgreSQL + pgvector → `localhost:5432`
 
+**Validation and benchmarking:**
+
+```bash
+# Seed synthetic graph data and fire anomaly events (wakes the agent if running)
+python scripts/seed.py --nodes 30 --edges 60 --anomalies 2
+
+# End-to-end smoke test — injects an anomaly and waits for the agent to produce a case file
+python scripts/validate_e2e.py --timeout 120
+
+# Latency benchmark — p50/p95/p99 across all read endpoints
+python scripts/benchmark.py --requests 200 --concurrency 10
+```
+
 ---
 
 ## Status
@@ -223,10 +236,11 @@ Open `http://localhost:3000` to view the dashboard.
 |---|---|---|
 | 1 | Ingestion pipeline — Kafka producers for Reddit, HN, GitHub | ✅ Done |
 | 2 | Stream processing — dedup, entity extraction, anomaly detection | ✅ Done |
-| 3 | Graph + vector layer — PostgreSQL schema, pgvector embeddings | 🔲 In progress |
-| 4 | Agent layer — LlamaIndex ReAct, tools, Ragas evaluation | ⬜ Pending |
-| 5 | API + frontend — FastAPI, WebSocket, SSE, Next.js dashboard | ⬜ Pending |
-| 6 | Benchmarks, end-to-end validation, performance profiling | ⬜ Pending |
+| 3 | Graph + vector layer — PostgreSQL schema, pgvector embeddings | ✅ Done |
+| 4 | Agent layer — LlamaIndex ReAct, tools, Ragas evaluation | ✅ Done |
+| 5a | API — FastAPI REST, WebSocket graph delta stream, SSE agent thought stream | ✅ Done |
+| 5b | Frontend — Next.js dashboard (live graph, case feed, SSE viewer) | ✅ Done |
+| 6 | Benchmarks, end-to-end validation, performance profiling | ✅ Done |
 
 ---
 
