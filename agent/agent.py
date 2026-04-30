@@ -189,7 +189,7 @@ async def agent_listener(emit_factory: Callable[[int], Emitter] | None = None) -
     def _on_notify(_conn, _pid, _channel, payload: str) -> None:
         try:
             event = json.loads(payload)
-            asyncio.get_event_loop().call_soon_threadsafe(queue.put_nowait, event)
+            asyncio.get_running_loop().call_soon_threadsafe(queue.put_nowait, event)
         except json.JSONDecodeError:
             log.warning("non-JSON notify payload: %.200s", payload)
 
