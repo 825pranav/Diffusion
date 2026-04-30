@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { PLATFORM_COLOR } from "@/lib/colors";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const POLL_MS = 15_000;
@@ -14,12 +15,6 @@ interface Anomaly {
   detected_at: string;
   investigated: boolean;
 }
-
-const PLATFORM_COLOR: Record<string, string> = {
-  reddit: "#f97316",
-  hn: "#eab308",
-  github: "#a855f7",
-};
 
 interface Props {
   selectedId: number | null;

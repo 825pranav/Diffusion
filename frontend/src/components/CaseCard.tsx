@@ -6,18 +6,7 @@ import {
   CaseFileDetail,
   fetchCaseDetail,
 } from "@/hooks/useCaseFiles";
-
-const CLASSIFICATION_COLOR: Record<string, string> = {
-  organic: "#22c55e",
-  coordinated_amplification: "#ef4444",
-  uncertain: "#eab308",
-};
-
-const PLATFORM_COLOR: Record<string, string> = {
-  reddit: "#f97316",
-  hn: "#eab308",
-  github: "#a855f7",
-};
+import { CLASSIFICATION_COLOR, PLATFORM_COLOR } from "@/lib/colors";
 
 function relativeTime(iso: string): string {
   const delta = Date.now() - new Date(iso).getTime();
