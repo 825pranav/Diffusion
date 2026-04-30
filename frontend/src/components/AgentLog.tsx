@@ -2,18 +2,13 @@
 
 import { useEffect, useRef } from "react";
 import { AgentEvent } from "@/hooks/useAgentStream";
+import { CLASSIFICATION_COLOR } from "@/lib/colors";
 
 interface Props {
   events: AgentEvent[];
   streaming: boolean;
   done: boolean;
 }
-
-const CLASSIFICATION_COLOR: Record<string, string> = {
-  organic: "#22c55e",
-  coordinated_amplification: "#ef4444",
-  uncertain: "#eab308",
-};
 
 function timestamp(ms: number) {
   return new Date(ms).toLocaleTimeString([], {

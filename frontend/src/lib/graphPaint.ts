@@ -1,10 +1,6 @@
 import type { GraphNode } from "@/hooks/useGraphSocket";
-
-export const PLATFORM_COLOR: Record<string, string> = {
-  reddit: "#f97316",
-  hn: "#eab308",
-  github: "#a855f7",
-};
+import { PLATFORM_COLOR } from "@/lib/colors";
+export { PLATFORM_COLOR };
 
 const DEFAULT_COLOR = "#6b7280";
 const BASE_RADIUS = 4;
