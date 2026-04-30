@@ -10,12 +10,6 @@ from __future__ import annotations
 CONFIDENCE_THRESHOLD = 0.65
 
 
-def apply_gate(confidence: float) -> tuple[bool, bool]:
-    """
-    Evaluate a confidence score against the publishing threshold.
-
-    Returns:
-        (should_publish, needs_review)
-    """
-    needs_review = confidence < CONFIDENCE_THRESHOLD
-    return not needs_review, needs_review
+def apply_gate(confidence: float) -> bool:
+    """Returns True if the case needs human review (confidence below threshold)."""
+    return confidence < CONFIDENCE_THRESHOLD

@@ -125,7 +125,7 @@ async def investigate(
     signals: list = result.get("signals", [])
     reasoning_steps: list = result.get("reasoning_steps", [])
 
-    _, needs_review = apply_gate(confidence)
+    needs_review = apply_gate(confidence)
 
     similar = await emb.search_similar(conn, node_id, session, limit=3)
 
