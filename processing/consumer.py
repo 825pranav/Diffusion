@@ -45,8 +45,6 @@ async def handle(
         vscore = scorer.record(node.id)
         await detector.evaluate(vscore, platform=platform)
 
-    # TODO (Stage 3): write es.nodes and es.edges to the propagation graph.
-
 
 async def main() -> None:
     dedup = DedupFilter()
