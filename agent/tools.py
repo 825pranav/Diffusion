@@ -42,6 +42,7 @@ def build_tools(conn, session: aiohttp.ClientSession, emit: Emitter | None = Non
         BFS over the propagation graph from node_id up to max_depth hops.
         Returns a JSON array of edges: [{source_id, target_id, edge_type, platform, ts, depth}].
         """
+        max_depth = min(max_depth, 10)
         await _call("get_propagation_path", node_id=node_id, max_depth=max_depth)
         edges = await queries.get_propagation_path(conn, node_id, max_depth)
         await _result("get_propagation_path", f"{len(edges)} edges found")
