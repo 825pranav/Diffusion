@@ -55,12 +55,19 @@ class VelocityScorer:
         return self._make_score(entity_id, bucket)
 
     def top_k(self, k: int = 10) -> list[VelocityScore]:
-        """Return the k highest-velocity entities at the current moment."""
-        return sorted(
-            (self.score(eid) for eid in list(self._buckets)),
-            key=lambda s: s.velocity,
-            reverse=True,
-        )[:k]
+        """Return the k highest-velocity entities at the current moment.
+
+        Entities whose window has fully expired are skipped — they would
+        all score zero and pollute the results with stale noise.
+        """
+        now = time.time()
+        scores = []
+        for eid in list(self._buckets):
+            bucket = self._buckets[eid]
+            self._evict(bucket, now)
+            if bucket:  # skip fully-expired entities
+                scores.append(self._make_score(eid, bucket))
+        return sorted(scores, key=lambda s: s.velocity, reverse=True)[:k]
 
     def _evict(self, bucket: deque[float], now: float) -> None:
         cutoff = now - self._window
