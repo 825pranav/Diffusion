@@ -125,7 +125,7 @@ async def get_cascade_size(conn, root_id: str, max_depth: int = 10) -> int:
             FROM graph_edges
             WHERE source_id = $1
 
-            UNION
+            UNION ALL
 
             SELECT e.target_id, c.depth + 1
             FROM graph_edges e
