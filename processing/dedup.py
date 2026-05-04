@@ -16,7 +16,9 @@ class DedupFilter:
         self._max = max_size
 
     def is_new(self, record: dict) -> bool:
-        key = f"{record.get('platform', 'unknown')}:{record.get('id', '')}"
+        if not record.get("id"):
+            return False
+        key = f"{record.get('platform', 'unknown')}:{record['id']}"
         if key in self._seen:
             return False
         self._seen.add(key)
