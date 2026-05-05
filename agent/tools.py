@@ -79,8 +79,13 @@ def build_tools(conn, session: aiohttp.ClientSession, emit: Emitter | None = Non
             "out_degree": degree["out_degree"],
         })
 
+    def _sync_stub(*args, **kwargs):
+        """Sync stub — agent always uses the async variant."""
+        raise NotImplementedError
+
     return [
         FunctionTool.from_defaults(
+            fn=_sync_stub,
             async_fn=get_propagation_path,
             name="get_propagation_path",
             description=(
@@ -89,6 +94,7 @@ def build_tools(conn, session: aiohttp.ClientSession, emit: Emitter | None = Non
             ),
         ),
         FunctionTool.from_defaults(
+            fn=_sync_stub,
             async_fn=search_similar_trends,
             name="search_similar_trends",
             description=(
@@ -97,6 +103,7 @@ def build_tools(conn, session: aiohttp.ClientSession, emit: Emitter | None = Non
             ),
         ),
         FunctionTool.from_defaults(
+            fn=_sync_stub,
             async_fn=classify_virality,
             name="classify_virality",
             description=(

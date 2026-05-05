@@ -53,7 +53,7 @@ def _run_ragas(
 ) -> dict[str, float]:
     from datasets import Dataset
     from ragas import evaluate
-    from ragas.metrics import answer_relevancy, context_relevancy, faithfulness
+    from ragas.metrics import answer_relevancy, context_precision, faithfulness
 
     question = (
         f"Is the trend '{trend}' spreading organically "
@@ -71,10 +71,10 @@ def _run_ragas(
         "contexts": [contexts],
     })
 
-    result = evaluate(ds, metrics=[context_relevancy, faithfulness, answer_relevancy])
+    result = evaluate(ds, metrics=[context_precision, faithfulness, answer_relevancy])
 
     return {
-        "retrieval_relevance": float(result["context_relevancy"]),
+        "retrieval_relevance": float(result["context_precision"]),
         "reasoning_consistency": float(result["faithfulness"]),
         "confidence_calibration": float(result["answer_relevancy"]),
     }
