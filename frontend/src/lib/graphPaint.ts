@@ -7,7 +7,6 @@ const BASE_RADIUS = 4;
 const MAX_EXTRA_RADIUS = 12;
 
 export function degreeToRadius(degree: number): number {
-  // logarithmic scale so high-degree nodes don't dominate
   return BASE_RADIUS + Math.min(Math.log1p(degree) * 2.5, MAX_EXTRA_RADIUS);
 }
 
@@ -15,7 +14,7 @@ export function makeNodeCanvasObject(anomalousIds: Set<string>) {
   return function nodeCanvasObject(
     node: GraphNode & { x?: number; y?: number },
     ctx: CanvasRenderingContext2D,
-    _globalScale: number
+    globalScale: number
   ) {
     const x = node.x ?? 0;
     const y = node.y ?? 0;
@@ -23,22 +22,66 @@ export function makeNodeCanvasObject(anomalousIds: Set<string>) {
     const color = PLATFORM_COLOR[node.platform?.toLowerCase()] ?? DEFAULT_COLOR;
     const isAnomaly = anomalousIds.has(node.id);
 
-    // glow
     ctx.save();
-    ctx.shadowColor = color;
-    ctx.shadowBlur = isAnomaly ? 18 : 10;
+
+    // pulsing ring for anomalous nodes
+    if (isAnomaly) {
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 400);
+      const ringR = r + 4 + pulse * 6;
+      ctx.beginPath();
+      ctx.arc(x, y, ringR, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(239,68,68,${0.3 + pulse * 0.5})`;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // second outer ring
+      const ring2R = r + 10 + pulse * 10;
+      ctx.beginPath();
+      ctx.arc(x, y, ring2R, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(239,68,68,${0.1 + pulse * 0.2})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    // glow
+    ctx.shadowColor = isAnomaly ? "#ef4444" : color;
+    ctx.shadowBlur = isAnomaly ? 20 : 8;
 
     // fill
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fillStyle = color;
+    ctx.fillStyle = isAnomaly ? "#ef4444" : color;
     ctx.fill();
 
-    // red anomaly outline
-    if (isAnomaly) {
-      ctx.strokeStyle = "#ef4444";
-      ctx.lineWidth = 2;
-      ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // label — show when zoomed in enough or node is large/anomalous
+    const label = node.label ?? node.id;
+    const showLabel = globalScale > 1.5 || r > 8 || isAnomaly;
+
+    if (showLabel) {
+      const fontSize = Math.max(8, Math.min(11, r * 1.1)) / globalScale;
+      ctx.font = `${fontSize}px sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+
+      // truncate long labels
+      const maxChars = 24;
+      const displayLabel = label.length > maxChars ? label.slice(0, maxChars) + "…" : label;
+
+      // text background
+      const textWidth = ctx.measureText(displayLabel).width;
+      const padding = 2 / globalScale;
+      ctx.fillStyle = "rgba(13,13,15,0.75)";
+      ctx.fillRect(
+        x - textWidth / 2 - padding,
+        y + r + 3 / globalScale,
+        textWidth + padding * 2,
+        fontSize + padding * 2
+      );
+
+      ctx.fillStyle = isAnomaly ? "#ef4444" : "#a1a1aa";
+      ctx.fillText(displayLabel, x, y + r + 3 / globalScale + padding);
     }
 
     ctx.restore();
