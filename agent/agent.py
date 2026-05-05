@@ -31,8 +31,8 @@ from graph import embeddings as emb
 from graph.models import ANOMALY_NOTIFY_CHANNEL
 from graph.queries import mark_anomaly_investigated
 
-DB_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/diffusion")
-MAX_AGENT_STEPS = int(os.getenv("AGENT_MAX_STEPS", "10"))
+DB_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5432/diffusion").replace("postgresql+asyncpg://", "postgresql://")
+MAX_AGENT_STEPS = int(os.getenv("AGENT_MAX_STEPS", "12"))
 
 log = logging.getLogger(__name__)
 
@@ -55,8 +55,9 @@ def _build_llm() -> LLM:
     groq_key = os.getenv("GROQ_API_KEY", "")
     if groq_key:
         from llama_index.llms.groq import Groq
-        log.info("LLM: Groq (llama-3.3-70b-versatile)")
-        return Groq(model="llama-3.3-70b-versatile", api_key=groq_key)
+        model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+        log.info("LLM: Groq (%s)", model)
+        return Groq(model=model, api_key=groq_key)
     from llama_index.llms.ollama import Ollama
     chat_model = os.getenv("OLLAMA_CHAT_MODEL", "llama3.2")
     log.info("LLM: Ollama fallback (%s)", chat_model)
@@ -127,7 +128,11 @@ async def investigate(
 
     needs_review = apply_gate(confidence)
 
-    similar = await emb.search_similar(conn, node_id, session, limit=3)
+    try:
+        similar = await emb.search_similar(conn, node_id, session, limit=3)
+    except Exception:
+        log.warning("embedding search unavailable (Ollama not running) — skipping similar cases")
+        similar = []
 
     ragas_scores = await evaluate_case(
         trend=node_id,
@@ -142,8 +147,8 @@ async def investigate(
         INSERT INTO case_files (
             anomaly_event_id, trend, platform_origin, detected_at,
             classification, confidence, signals, similar_past_cases,
-            ragas_scores, agent_reasoning_steps, needs_review
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11)
+            ragas_scores, agent_reasoning_steps, reasoning_steps_detail, needs_review
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11::jsonb, $12)
         """,
         anomaly_id,
         node_id,
@@ -155,6 +160,7 @@ async def investigate(
         json.dumps(similar),
         json.dumps(ragas_scores),
         len(reasoning_steps),
+        json.dumps(reasoning_steps),
         needs_review,
     )
 
@@ -209,6 +215,7 @@ async def agent_listener(emit_factory: Callable[[int], Emitter] | None = None) -
                 async with pool.acquire() as conn:
                     try:
                         await investigate(conn, session, event, emit=emit)
+                        await asyncio.sleep(5)  # avoid Groq rate limits between investigations
                     except Exception:
                         log.exception("investigation failed for event %s", anomaly_id)
     finally:
