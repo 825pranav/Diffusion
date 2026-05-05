@@ -15,7 +15,7 @@ import os
 import asyncpg
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-DB_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5432/diffusion")
+DB_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5432/diffusion").replace("postgresql+asyncpg://", "postgresql://")
 
 log = logging.getLogger(__name__)
 
