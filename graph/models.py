@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS case_files (
     similar_past_cases   JSONB        NOT NULL DEFAULT '[]',
     ragas_scores         JSONB        NOT NULL DEFAULT '{}',
     agent_reasoning_steps INT         NOT NULL DEFAULT 0,
+    reasoning_steps_detail JSONB      NOT NULL DEFAULT '[]',
     needs_review         BOOLEAN      NOT NULL DEFAULT FALSE,
     created_at           TIMESTAMPTZ  NOT NULL DEFAULT now()
 );

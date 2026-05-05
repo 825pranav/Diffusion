@@ -16,6 +16,8 @@ Queries:
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -31,7 +33,7 @@ async def upsert_node(conn, node_id: str, node_type: str, platform: str, label: 
                 metadata  = EXCLUDED.metadata,
                 last_seen = now()
         """,
-        node_id, node_type, platform, label, metadata,
+        node_id, node_type, platform, label, json.dumps(metadata),
     )
 
 
@@ -41,13 +43,22 @@ async def insert_edge(
     target_id: str,
     edge_type: str,
     platform: str,
-    ts: str | None,
+    ts: str | datetime | None,
     weight: float = 1.0,
 ) -> None:
+    # asyncpg requires a datetime object for timestamptz columns
+    if isinstance(ts, str):
+        try:
+            ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            ts = datetime.now(timezone.utc)
+    elif ts is None:
+        ts = datetime.now(timezone.utc)
+
     await conn.execute(
         """
         INSERT INTO graph_edges (source_id, target_id, edge_type, platform, ts, weight)
-        VALUES ($1, $2, $3, $4, $5::timestamptz, $6)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (source_id, target_id, platform, ts) DO NOTHING
         """,
         source_id, target_id, edge_type, platform, ts, weight,
