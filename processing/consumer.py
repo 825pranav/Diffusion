@@ -3,18 +3,23 @@ import json
 import logging
 import os
 
+from dotenv import load_dotenv
+load_dotenv()
+
+import asyncpg
 from aiokafka import AIOKafkaConsumer
 
 from processing.anomaly_detector import AnomalyDetector
 from processing.dedup import DedupFilter
-from processing.entity_extractor import Node, extract_entity_set
+from processing.entity_extractor import Node, Edge, extract_entity_set
 from processing.velocity_scorer import VelocityScorer
+from graph.queries import upsert_node, insert_edge
 
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5432/diffusion").replace("postgresql+asyncpg://", "postgresql://")
 TOPICS = ["reddit-raw", "hn-raw", "gh-raw"]
 GROUP_ID = os.getenv("KAFKA_GROUP_ID", "diffusion-processor")
 
-# Entity types whose activity is meaningful to track for trend velocity.
 _VELOCITY_TYPES = {"named_entity", "repo"}
 
 log = logging.getLogger(__name__)
@@ -22,6 +27,7 @@ log = logging.getLogger(__name__)
 
 async def handle(
     record: dict,
+    conn: asyncpg.Connection,
     scorer: VelocityScorer,
     detector: AnomalyDetector,
 ) -> None:
@@ -30,15 +36,25 @@ async def handle(
     if not es.nodes:
         return
 
-    log.info(
-        "extracted %d nodes %d edges from %s/%s",
-        len(es.nodes),
-        len(es.edges),
-        platform,
-        record.get("id"),
-    )
+    # Write nodes to DB
+    for node in es.nodes:
+        await upsert_node(conn, node.id, node.type, node.platform, node.label, node.metadata)
 
-    # Score velocity for trackable entity types and check for anomalies.
+    # Write edges to DB (triggers graph_delta NOTIFY → WebSocket → frontend)
+    for edge in es.edges:
+        await insert_edge(
+            conn,
+            source_id=edge.source_id,
+            target_id=edge.target_id,
+            edge_type=edge.edge_type,
+            platform=edge.platform,
+            weight=edge.weight,
+            ts=edge.timestamp,
+        )
+
+    log.info("wrote %d nodes %d edges from %s/%s", len(es.nodes), len(es.edges), platform, record.get("id"))
+
+    # Score velocity and detect anomalies
     for node in es.nodes:
         if node.type not in _VELOCITY_TYPES:
             continue
@@ -50,6 +66,7 @@ async def main() -> None:
     dedup = DedupFilter()
     scorer = VelocityScorer()
     detector = AnomalyDetector()
+    db = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=5)
     consumer = AIOKafkaConsumer(
         *TOPICS,
         bootstrap_servers=KAFKA_BROKER,
@@ -66,12 +83,14 @@ async def main() -> None:
             if not dedup.is_new(record):
                 continue
             try:
-                await handle(record, scorer, detector)
+                async with db.acquire() as conn:
+                    await handle(record, conn, scorer, detector)
             except Exception:
                 log.exception("error processing record %s", record.get("id"))
     finally:
         await consumer.stop()
         await detector.close()
+        await db.close()
 
 
 if __name__ == "__main__":

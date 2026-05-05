@@ -83,17 +83,22 @@ class AnomalyDetector:
     async def _notify(self, event: AnomalyEvent) -> None:
         try:
             conn = await self._get_db()
-            payload = json.dumps(asdict(event))
-            await conn.execute("SELECT pg_notify($1, $2)", NOTIFY_CHANNEL, payload)
+            # INSERT triggers trg_anomaly_notify which fires NOTIFY automatically
+            await conn.execute(
+                """
+                INSERT INTO anomaly_events (node_id, platform, z_score, velocity)
+                VALUES ($1, $2, $3, $4)
+                """,
+                event.entity_id, event.platform,
+                event.z_score, event.current_velocity,
+            )
             log.info(
-                "anomaly: entity=%s platform=%s z=%.2f velocity=%.2f",
-                event.entity_id,
-                event.platform,
-                event.z_score,
-                event.current_velocity,
+                "anomaly inserted: entity=%s platform=%s z=%.2f velocity=%.2f",
+                event.entity_id, event.platform,
+                event.z_score, event.current_velocity,
             )
         except Exception:
-            log.exception("pg_notify failed for entity %s", event.entity_id)
+            log.exception("anomaly insert failed for entity %s", event.entity_id)
 
     def _z_score(
         self, entity_id: str, velocity: float
