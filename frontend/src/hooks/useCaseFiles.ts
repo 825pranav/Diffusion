@@ -9,12 +9,15 @@ export interface CaseFileSummary {
   id: number;
   anomaly_event_id: number | null;
   trend: string;
+  label: string;
   platform_origin: string;
   detected_at: string;
   classification: string;
   confidence: number;
   needs_review: boolean;
   created_at: string;
+  z_score: number | null;
+  velocity: number | null;
 }
 
 export interface SimilarCase {
@@ -34,6 +37,7 @@ export interface CaseFileDetail extends CaseFileSummary {
   similar_past_cases: SimilarCase[];
   ragas_scores: RagasScores;
   agent_reasoning_steps: number;
+  reasoning_steps_detail: string[];
 }
 
 export interface CaseFilters {
@@ -77,7 +81,14 @@ export async function fetchCaseDetail(id: number): Promise<CaseFileDetail | null
   try {
     const res = await fetch(`${API_URL}/case-files/${id}`);
     if (!res.ok) return null;
-    return res.json();
+    const data = await res.json();
+    // signals and similar_past_cases may come back as JSON strings from asyncpg
+    if (typeof data.signals === "string") data.signals = JSON.parse(data.signals);
+    if (typeof data.similar_past_cases === "string") data.similar_past_cases = JSON.parse(data.similar_past_cases);
+    if (typeof data.ragas_scores === "string") data.ragas_scores = JSON.parse(data.ragas_scores);
+    if (typeof data.reasoning_steps_detail === "string") data.reasoning_steps_detail = JSON.parse(data.reasoning_steps_detail);
+    if (!Array.isArray(data.reasoning_steps_detail)) data.reasoning_steps_detail = [];
+    return data;
   } catch {
     return null;
   }

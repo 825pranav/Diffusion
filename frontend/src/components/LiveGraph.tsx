@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useMemo, useEffect } from "react";
+import { useMemo, useEffect, useRef } from "react";
 import { useGraphSocket, GraphNode, GraphEdge } from "@/hooks/useGraphSocket";
 import { useAnomalies } from "@/hooks/useAnomalies";
 import { makeNodeCanvasObject, PLATFORM_COLOR } from "@/lib/graphPaint";
@@ -23,28 +23,46 @@ export default function LiveGraph() {
   const { nodes, edges, connected } = useGraphSocket();
   const anomalousIds = useAnomalies();
   const { setConnected } = useConnection();
+  const graphRef = useRef<any>(null);
 
   useEffect(() => {
     setConnected(connected);
   }, [connected, setConnected]);
 
+  // re-render every frame so anomaly pulse animation runs
+  useEffect(() => {
+    let raf: number;
+    function tick() {
+      graphRef.current?.refresh?.();
+      raf = requestAnimationFrame(tick);
+    }
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
   const graphData = useMemo(() => {
-    const nodeArray: (GraphNode & { x?: number; y?: number })[] = Array.from(nodes.values());
-    const edgeArray: { source: string; target: string }[] = edges.map((e: GraphEdge) => ({
-      source: e.source,
-      target: e.target,
-    }));
+    const nodeMap = nodes;
+    const nodeArray: (GraphNode & { x?: number; y?: number })[] = Array.from(nodeMap.values());
+    // only include edges where both ends exist
+    const edgeArray = edges
+      .filter((e: GraphEdge) => nodeMap.has(e.source) && nodeMap.has(e.target))
+      .map((e: GraphEdge) => ({ source: e.source, target: e.target }));
     return { nodes: nodeArray, links: edgeArray };
   }, [nodes, edges]);
 
+  // nodeCanvasObject recreated when anomalousIds changes — stable ref otherwise
+  const anomalousRef = useRef(anomalousIds);
+  anomalousRef.current = anomalousIds;
   const nodeCanvasObject = useMemo(
-    () => makeNodeCanvasObject(anomalousIds),
+    () => makeNodeCanvasObject(anomalousRef.current),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [anomalousIds]
   );
 
   return (
     <div className="relative w-full h-full bg-surface">
       <ForceGraph2D
+        ref={graphRef}
         graphData={graphData}
         nodeId="id"
         nodeCanvasObject={nodeCanvasObject as never}
@@ -54,6 +72,7 @@ export default function LiveGraph() {
         backgroundColor="#0d0d0f"
         width={undefined}
         height={undefined}
+        nodeLabel={(node: any) => node.label ?? node.id}
       />
 
       {/* legend */}

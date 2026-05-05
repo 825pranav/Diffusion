@@ -1,5 +1,5 @@
-import { redirect } from "next/navigation";
+import TrendingDashboard from "@/components/TrendingDashboard";
 
 export default function Home() {
-  redirect("/graph");
+  return <TrendingDashboard />;
 }
