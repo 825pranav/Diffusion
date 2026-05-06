@@ -2,7 +2,7 @@ import type { GraphNode } from "@/hooks/useGraphSocket";
 import { PLATFORM_COLOR } from "@/lib/colors";
 export { PLATFORM_COLOR };
 
-const DEFAULT_COLOR = "#6b7280";
+const DEFAULT_COLOR = "#3a5045"; // outline / muted
 const BASE_RADIUS = 4;
 const MAX_EXTRA_RADIUS = 12;
 
@@ -30,7 +30,7 @@ export function makeNodeCanvasObject(anomalousIds: Set<string>) {
       const ringR = r + 4 + pulse * 6;
       ctx.beginPath();
       ctx.arc(x, y, ringR, 0, Math.PI * 2);
-      ctx.strokeStyle = `rgba(239,68,68,${0.3 + pulse * 0.5})`;
+      ctx.strokeStyle = `rgba(255,77,77,${0.3 + pulse * 0.5})`; // error
       ctx.lineWidth = 1.5;
       ctx.stroke();
 
@@ -38,19 +38,19 @@ export function makeNodeCanvasObject(anomalousIds: Set<string>) {
       const ring2R = r + 10 + pulse * 10;
       ctx.beginPath();
       ctx.arc(x, y, ring2R, 0, Math.PI * 2);
-      ctx.strokeStyle = `rgba(239,68,68,${0.1 + pulse * 0.2})`;
+      ctx.strokeStyle = `rgba(255,77,77,${0.1 + pulse * 0.2})`;
       ctx.lineWidth = 1;
       ctx.stroke();
     }
 
     // glow
-    ctx.shadowColor = isAnomaly ? "#ef4444" : color;
+    ctx.shadowColor = isAnomaly ? "#ff4d4d" : color;
     ctx.shadowBlur = isAnomaly ? 20 : 8;
 
     // fill
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fillStyle = isAnomaly ? "#ef4444" : color;
+    ctx.fillStyle = isAnomaly ? "#ff4d4d" : color;
     ctx.fill();
 
     ctx.shadowBlur = 0;
@@ -72,7 +72,7 @@ export function makeNodeCanvasObject(anomalousIds: Set<string>) {
       // text background
       const textWidth = ctx.measureText(displayLabel).width;
       const padding = 2 / globalScale;
-      ctx.fillStyle = "rgba(13,13,15,0.75)";
+      ctx.fillStyle = "rgba(10,13,15,0.85)"; // background at 85%
       ctx.fillRect(
         x - textWidth / 2 - padding,
         y + r + 3 / globalScale,
@@ -80,7 +80,7 @@ export function makeNodeCanvasObject(anomalousIds: Set<string>) {
         fontSize + padding * 2
       );
 
-      ctx.fillStyle = isAnomaly ? "#ef4444" : "#a1a1aa";
+      ctx.fillStyle = isAnomaly ? "#ff4d4d" : "#c8e8e0"; // error or body text
       ctx.fillText(displayLabel, x, y + r + 3 / globalScale + padding);
     }
 

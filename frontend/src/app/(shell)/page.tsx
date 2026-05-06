@@ -1,5 +1,5 @@
 import TrendingDashboard from "@/components/TrendingDashboard";
 
-export default function Home() {
+export default function HomePage() {
   return <TrendingDashboard />;
 }
