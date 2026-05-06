@@ -3,8 +3,8 @@
 @tailwind utilities;
 
 :root {
-  --background: #0d0d0f;
-  --foreground: #e2e2e8;
+  --background: #0a0d0f;
+  --foreground: #e8edf2;
 }
 
 * {
@@ -14,27 +14,35 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-geist-mono), monospace;
+  font-family: var(--font-manrope), Manrope, sans-serif;
   overflow: hidden;
 }
 
-::-webkit-scrollbar {
-  width: 4px;
-}
-::-webkit-scrollbar-track {
-  background: #111114;
-}
-::-webkit-scrollbar-thumb {
-  background: #2a2a35;
-  border-radius: 2px;
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
 }
 
-@keyframes pulse-ring {
-  0% { transform: scale(1); opacity: 0.8; }
-  100% { transform: scale(2.2); opacity: 0; }
-}
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: #0a0d0f; }
+::-webkit-scrollbar-thumb { background: #1e2428; border-radius: 2px; }
 
-@keyframes throb {
+@keyframes node-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(77,217,172,0.7); }
+  70%  { box-shadow: 0 0 0 10px rgba(77,217,172,0); }
+  100% { box-shadow: 0 0 0 0 rgba(77,217,172,0); }
+}
+.node-pulse { animation: node-pulse 2s infinite; }
+
+.terminal-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 14px;
+  background-color: #4dd9ac;
+  margin-left: 2px;
+  vertical-align: middle;
+  animation: blink 1s step-end infinite;
+}
+@keyframes blink {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+  50%       { opacity: 0; }
 }
