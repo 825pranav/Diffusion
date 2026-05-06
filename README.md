@@ -3,6 +3,8 @@
 
 *It's not about what's trending. It's about how and why it spread.*
 
+> New dashboard in `new-front` branch — bento layout, 4 palettes, full backend wiring.
+
 ---
 
 ## Overview
