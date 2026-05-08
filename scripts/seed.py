@@ -23,7 +23,7 @@ import asyncpg
 
 DB_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5432/diffusion")
 
-PLATFORMS = ["reddit", "hn", "github"]
+PLATFORMS = ["bluesky", "mastodon", "hn", "github"]
 EDGE_TYPES = ["repost", "comment", "reference", "share"]
 
 log = logging.getLogger(__name__)
