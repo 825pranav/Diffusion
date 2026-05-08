@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -17,6 +18,19 @@ router = APIRouter()
 # Frontend uses short codes; DB stores full names
 _PLATFORM_DB = {"gh": "github", "hn": "hn", "bsky": "bluesky", "mdn": "mastodon"}
 
+# DB platform names → frontend short codes
+_PLATFORM_SHORT = {
+    "hn": "hn",
+    "github": "gh", "gh": "gh",
+    "bluesky": "bsky", "bsky": "bsky",
+    "mastodon": "mdn", "mdn": "mdn",
+}
+
+
+def __norm_platform(p: str) -> str:
+    return _PLATFORM_SHORT.get(p.lower(), p[:4])
+
+
 def _window_minutes(window: str) -> int:
     if window == "30m":
         return 30
@@ -25,7 +39,7 @@ def _window_minutes(window: str) -> int:
     if window == "today":
         now = datetime.now(timezone.utc)
         return int((now.hour * 60 + now.minute) or 1)
-    return 30
+    raise HTTPException(status_code=400, detail=f"invalid window: {window!r}; expected 30m, 2h, or today")
 
 
 @router.get("/trending")
@@ -40,8 +54,6 @@ async def get_trending(
     platform_filter = None if platform == "all" else _PLATFORM_DB.get(platform, platform)
 
     async with request.app.state.db.acquire() as conn:
-        # ── Top nodes by velocity in the window ───────────────────────────────
-        plat_clause = "AND n.platform = $3" if platform_filter else ""
         plat_args = [platform_filter] if platform_filter else []
 
         rows = await conn.fetch(
@@ -49,14 +61,14 @@ async def get_trending(
             WITH recent AS (
                 SELECT e.source_id, e.target_id, e.platform, e.ingested_at, e.ts
                 FROM graph_edges e
-                WHERE e.ingested_at >= now() - ($1 || ' minutes')::interval
+                WHERE e.ingested_at >= now() - $1 * interval '1 minute'
                   {("AND e.platform = $3" if platform_filter else "")}
             ),
             prev AS (
                 SELECT e.source_id, e.target_id
                 FROM graph_edges e
-                WHERE e.ingested_at >= now() - ($2 || ' minutes')::interval
-                  AND e.ingested_at < now() - ($1 || ' minutes')::interval
+                WHERE e.ingested_at >= now() - $2 * interval '1 minute'
+                  AND e.ingested_at < now() - $1 * interval '1 minute'
                   {("AND e.platform = $3" if platform_filter else "")}
             ),
             node_curr AS (
@@ -107,7 +119,7 @@ async def get_trending(
             ORDER BY nc.curr_count DESC
             LIMIT 50
             """,
-            str(wm), str(wm * 2), *plat_args,
+            wm, wm * 2, *plat_args,
         )
 
         if not rows:
@@ -125,18 +137,18 @@ async def get_trending(
                 target_id AS node_id,
                 width_bucket(
                     EXTRACT(EPOCH FROM ingested_at),
-                    EXTRACT(EPOCH FROM now() - ($2 || ' minutes')::interval),
+                    EXTRACT(EPOCH FROM now() - $2 * interval '1 minute'),
                     EXTRACT(EPOCH FROM now()),
                     12
                 ) AS bucket,
                 COUNT(*) AS cnt
             FROM graph_edges
             WHERE target_id = ANY($1)
-              AND ingested_at >= now() - ($2 || ' minutes')::interval
+              AND ingested_at >= now() - $2 * interval '1 minute'
             GROUP BY target_id, bucket
             ORDER BY target_id, bucket
             """,
-            node_ids, str(wm),
+            node_ids, wm,
         )
 
         # Build sparkline map: node_id → [12 values]
@@ -162,10 +174,10 @@ async def get_trending(
                 EXTRACT(EPOCH FROM (now() - ingested_at)) / 60 AS minutes_ago
             FROM graph_edges
             WHERE target_id = ANY($1)
-              AND ingested_at >= now() - ($2 || ' minutes')::interval
+              AND ingested_at >= now() - $2 * interval '1 minute'
             ORDER BY target_id, platform, ingested_at ASC
             """,
-            node_ids, str(wm),
+            node_ids, wm,
         )
 
         prop_map: dict[str, list[dict]] = {}
@@ -182,16 +194,6 @@ async def get_trending(
             prop_map[nid].sort(key=lambda x: x["minutesAgo"], reverse=True)
 
         # ── Assemble topics ───────────────────────────────────────────────────
-        PLATFORM_MAP = {
-            "hn": "hn",
-            "github": "gh", "gh": "gh",
-            "bluesky": "bsky", "bsky": "bsky",
-            "mastodon": "mdn", "mdn": "mdn",
-        }
-
-        def norm_platform(p: str) -> str:
-            return PLATFORM_MAP.get(p.lower(), p[:4])
-
         topics = []
         for r in rows:
             curr = float(r["curr_count"])
@@ -211,18 +213,18 @@ async def get_trending(
 
             raw_platforms = r["platforms"] or [r["node_platform"]]
             platforms = list(dict.fromkeys(
-                norm_platform(p) for p in raw_platforms
-                if norm_platform(p) in ("hn", "gh", "bsky", "mdn")
+                _norm_platform(p) for p in raw_platforms
+                if _norm_platform(p) in ("hn", "gh", "bsky", "mdn")
             ))
             if not platforms:
-                platforms = [norm_platform(r["node_platform"])]
+                platforms = [_norm_platform(r["node_platform"])]
 
             sparkline = sparkline_map.get(r["id"], [0.0] * 12)
 
             prop_steps = [
-                {"platform": norm_platform(s["platform"]), "minutesAgo": s["minutesAgo"]}
+                {"platform": _norm_platform(s["platform"]), "minutesAgo": s["minutesAgo"]}
                 for s in prop_map.get(r["id"], [])
-                if norm_platform(s["platform"]) in ("hn", "gh", "bsky", "mdn")
+                if _norm_platform(s["platform"]) in ("hn", "gh", "bsky", "mdn")
             ]
             if not prop_steps:
                 prop_steps = [{"platform": platforms[0], "minutesAgo": 0}]
@@ -232,9 +234,8 @@ async def get_trending(
             node_type = r["node_type"]
             meta = r["metadata"] or {}
             if isinstance(meta, str):
-                import json as _json
                 try:
-                    meta = _json.loads(meta)
+                    meta = json.loads(meta)
                 except Exception:
                     meta = {}
             url = None
@@ -284,10 +285,10 @@ async def get_trending(
             """
             SELECT COUNT(DISTINCT target_id)
             FROM graph_edges
-            WHERE ingested_at >= now() - ($1 || ' minutes')::interval
-              AND ingested_at < now() - ($2 || ' minutes')::interval
+            WHERE ingested_at >= now() - $1 * interval '1 minute'
+              AND ingested_at < now() - $2 * interval '1 minute'
             """,
-            str(wm * 2), str(wm),
+            wm * 2, wm,
         )
 
         stats = {
@@ -367,11 +368,11 @@ async def list_edges(
             """
             SELECT source_id, target_id, platform, ts
             FROM graph_edges
-            WHERE ingested_at >= now() - ($1 || ' minutes')::interval
+            WHERE ingested_at >= now() - $1 * interval '1 minute'
             ORDER BY ingested_at DESC
             LIMIT $2
             """,
-            str(since_minutes), limit,
+            since_minutes, limit,
         )
     return [dict(r) for r in rows]
 

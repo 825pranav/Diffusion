@@ -170,13 +170,13 @@ async def get_top_nodes_by_degree(
             COUNT(e.id) AS in_degree
         FROM graph_nodes n
         JOIN graph_edges e ON e.target_id = n.id
-        WHERE e.ingested_at >= now() - ($1 || ' minutes')::interval
+        WHERE e.ingested_at >= now() - $1 * interval '1 minute'
           AND ($2::text IS NULL OR n.platform = $2)
         GROUP BY n.id, n.type, n.platform, n.label
         ORDER BY in_degree DESC
         LIMIT $3
         """,
-        str(since_minutes), platform, limit,
+        since_minutes, platform, limit,
     )
     return [dict(r) for r in rows]
 
