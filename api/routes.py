@@ -15,7 +15,7 @@ router = APIRouter()
 # ── trending ──────────────────────────────────────────────────────────────────
 
 # Frontend uses short codes; DB stores full names
-_PLATFORM_DB = {"gh": "github", "rd": "reddit", "hn": "hn"}
+_PLATFORM_DB = {"gh": "github", "hn": "hn", "bsky": "bluesky", "mdn": "mastodon"}
 
 def _window_minutes(window: str) -> int:
     if window == "30m":
@@ -182,11 +182,15 @@ async def get_trending(
             prop_map[nid].sort(key=lambda x: x["minutesAgo"], reverse=True)
 
         # ── Assemble topics ───────────────────────────────────────────────────
-        PLATFORM_MAP = {"hn": "hn", "gh": "gh", "github": "gh",
-                        "reddit": "rd", "rd": "rd"}
+        PLATFORM_MAP = {
+            "hn": "hn",
+            "github": "gh", "gh": "gh",
+            "bluesky": "bsky", "bsky": "bsky",
+            "mastodon": "mdn", "mdn": "mdn",
+        }
 
         def norm_platform(p: str) -> str:
-            return PLATFORM_MAP.get(p.lower(), p[:2])
+            return PLATFORM_MAP.get(p.lower(), p[:4])
 
         topics = []
         for r in rows:
@@ -208,7 +212,7 @@ async def get_trending(
             raw_platforms = r["platforms"] or [r["node_platform"]]
             platforms = list(dict.fromkeys(
                 norm_platform(p) for p in raw_platforms
-                if norm_platform(p) in ("hn", "gh", "rd")
+                if norm_platform(p) in ("hn", "gh", "bsky", "mdn")
             ))
             if not platforms:
                 platforms = [norm_platform(r["node_platform"])]
@@ -218,7 +222,7 @@ async def get_trending(
             prop_steps = [
                 {"platform": norm_platform(s["platform"]), "minutesAgo": s["minutesAgo"]}
                 for s in prop_map.get(r["id"], [])
-                if norm_platform(s["platform"]) in ("hn", "gh", "rd")
+                if norm_platform(s["platform"]) in ("hn", "gh", "bsky", "mdn")
             ]
             if not prop_steps:
                 prop_steps = [{"platform": platforms[0], "minutesAgo": 0}]
@@ -242,9 +246,6 @@ async def get_trending(
                 if not url and node_id.startswith("hn:"):
                     hn_id = node_id.removeprefix("hn:")
                     url = f"https://news.ycombinator.com/item?id={hn_id}"
-                elif not url and node_id.startswith("reddit:"):
-                    reddit_id = node_id.removeprefix("reddit:")
-                    url = f"https://reddit.com/comments/{reddit_id}"
             elif node_type == "named_entity":
                 label = r["label"] or ""
                 url = f"https://hn.algolia.com/?q={label.replace(' ', '+')}"
