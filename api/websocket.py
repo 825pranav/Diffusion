@@ -62,9 +62,7 @@ async def graph_delta_listener() -> None:
             conn = await asyncpg.connect(DB_URL)
 
             def _on_notify(_conn, _pid, _channel, payload: str) -> None:
-                asyncio.get_running_loop().call_soon_threadsafe(
-                    asyncio.create_task, manager.broadcast(payload)
-                )
+                asyncio.ensure_future(manager.broadcast(payload))
 
             await conn.add_listener(GRAPH_DELTA_CHANNEL, _on_notify)
             log.info("graph delta listener active on channel '%s'", GRAPH_DELTA_CHANNEL)

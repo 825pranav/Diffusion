@@ -30,7 +30,7 @@ ANOMALY_THRESHOLD = float(os.getenv("ANOMALY_Z_THRESHOLD", "2.5"))
 HISTORY_SIZE = int(os.getenv("ANOMALY_HISTORY_SIZE", "60"))
 MIN_SAMPLES = int(os.getenv("ANOMALY_MIN_SAMPLES", "5"))
 NOTIFY_CHANNEL = "anomaly_detected"
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/diffusion")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5432/diffusion")
 
 log = logging.getLogger(__name__)
 
