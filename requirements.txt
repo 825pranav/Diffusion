@@ -1,5 +1,4 @@
 # Ingestion
-praw==7.7.1
 aiohttp==3.9.5
 PyGithub==2.3.0
 aiokafka==0.10.0
