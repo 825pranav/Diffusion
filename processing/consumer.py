@@ -17,7 +17,7 @@ from graph.queries import upsert_node, insert_edge
 
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5432/diffusion").replace("postgresql+asyncpg://", "postgresql://")
-TOPICS = ["reddit-raw", "hn-raw", "gh-raw"]
+TOPICS = ["bluesky-raw", "mastodon-raw", "hn-raw", "gh-raw"]
 GROUP_ID = os.getenv("KAFKA_GROUP_ID", "diffusion-processor")
 
 _VELOCITY_TYPES = {"named_entity", "repo"}
