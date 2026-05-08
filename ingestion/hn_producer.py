@@ -7,6 +7,7 @@ them to the `hn-raw` Kafka topic.
 
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime, timezone
 
@@ -20,6 +21,8 @@ KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
 TOPIC = "hn-raw"
 HN_BASE = "https://hacker-news.firebaseio.com/v0"
 POLL_INTERVAL = int(os.getenv("HN_POLL_INTERVAL", "60"))  # seconds
+
+log = logging.getLogger(__name__)
 
 
 async def _fetch_json(session: aiohttp.ClientSession, url: str) -> dict | list:
@@ -47,16 +50,29 @@ async def _fetch_item(session: aiohttp.ClientSession, item_id: int) -> dict | No
 
 
 async def produce(session: aiohttp.ClientSession, producer: AIOKafkaProducer, seen: set) -> None:
-    new_ids: list[int] = await _fetch_json(session, f"{HN_BASE}/newstories.json")
-    fresh = [i for i in new_ids[:200] if i not in seen]
+    try:
+        new_ids: list[int] = await _fetch_json(session, f"{HN_BASE}/newstories.json")
+    except Exception:
+        log.exception("failed to fetch HN new stories")
+        return
 
+    fresh = [i for i in new_ids[:200] if i not in seen]
+    published = 0
     for item_id in fresh:
-        item = await _fetch_item(session, item_id)
+        try:
+            item = await _fetch_item(session, item_id)
+        except Exception:
+            log.warning("failed to fetch HN item %s", item_id)
+            seen.add(item_id)
+            continue
         if item:
             await producer.send_and_wait(TOPIC, json.dumps(item).encode())
+            published += 1
         seen.add(item_id)
 
-    # Keep seen set bounded
+    if published:
+        log.info("published %d new stories from HN", published)
+
     if len(seen) > 5000:
         seen.difference_update(list(seen)[:2000])
 

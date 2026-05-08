@@ -7,6 +7,7 @@ PushEvent) and publishes them to the `gh-raw` Kafka topic.
 
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime, timezone
 
@@ -22,6 +23,8 @@ GH_TOKEN = os.getenv("GITHUB_TOKEN", "")
 POLL_INTERVAL = int(os.getenv("GH_POLL_INTERVAL", "60"))  # seconds
 
 TRACKED_EVENT_TYPES = {"WatchEvent", "ForkEvent", "PushEvent", "CreateEvent"}
+
+log = logging.getLogger(__name__)
 
 _HEADERS = {
     "Accept": "application/vnd.github+json",
@@ -49,10 +52,15 @@ async def produce(
     seen: set,
 ) -> None:
     url = "https://api.github.com/events?per_page=100"
-    async with session.get(url, headers=_HEADERS) as resp:
-        resp.raise_for_status()
-        events: list[dict] = await resp.json()
+    try:
+        async with session.get(url, headers=_HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            resp.raise_for_status()
+            events: list[dict] = await resp.json()
+    except Exception:
+        log.exception("failed to fetch GitHub events")
+        return
 
+    published = 0
     for event in events:
         if event["type"] not in TRACKED_EVENT_TYPES:
             continue
@@ -61,6 +69,10 @@ async def produce(
         payload = json.dumps(_serialize_event(event)).encode()
         await producer.send_and_wait(TOPIC, payload)
         seen.add(event["id"])
+        published += 1
+
+    if published:
+        log.info("published %d new GitHub events", published)
 
     if len(seen) > 10_000:
         seen.difference_update(list(seen)[:5000])
