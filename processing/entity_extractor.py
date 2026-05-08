@@ -1,12 +1,12 @@
 """
 Entity extractor for stream processing.
 
-Parses raw events from Reddit, HN, and GitHub into typed graph nodes
-and directed edges. Rule-based extraction handles all structured fields;
-spaCy en_core_web_sm (CPU, ~12 MB) handles NER on free text.
+Parses raw events from Bluesky, Mastodon, HN, and GitHub into typed
+graph nodes and directed edges. Rule-based extraction handles all
+structured fields; spaCy en_core_web_sm (CPU, ~12 MB) handles NER
+on free text.
 
 The model is loaded once at first call and reused — no GPU required.
-RTX 4050 VRAM is preserved for the embeddings layer in Stage 3.
 """
 
 from __future__ import annotations
@@ -86,56 +86,84 @@ def _ner_nodes_and_edges(
     return nodes, edges
 
 
-def _extract_reddit(record: dict) -> EntitySet:
+def _extract_bluesky(record: dict) -> EntitySet:
     es = EntitySet()
     ts = record.get("ingested_at")
 
-    content_id = f"reddit:{record['id']}"
+    content_id = f"bluesky:{record['id']}"
+    text = record.get("text", "")
     es.nodes.append(Node(
         id=content_id,
         type="content",
-        platform="reddit",
-        label=record.get("title", ""),
+        platform="bluesky",
+        label=text[:120],
+        metadata={"created_utc": record.get("created_utc"), "langs": record.get("langs", [])},
+    ))
+
+    author = record.get("author")
+    if author:
+        author_id = f"bluesky:user:{author}"
+        es.nodes.append(Node(id=author_id, type="author", platform="bluesky", label=author))
+        es.edges.append(Edge(
+            source_id=author_id,
+            target_id=content_id,
+            edge_type="authored",
+            platform="bluesky",
+            timestamp=ts,
+        ))
+
+    if text:
+        ent_nodes, ent_edges = _ner_nodes_and_edges(text, content_id, "bluesky", ts)
+        es.nodes.extend(ent_nodes)
+        es.edges.extend(ent_edges)
+
+    return es
+
+
+def _extract_mastodon(record: dict) -> EntitySet:
+    es = EntitySet()
+    ts = record.get("ingested_at")
+
+    content_id = f"mastodon:{record['id']}"
+    text = record.get("text", "")
+    es.nodes.append(Node(
+        id=content_id,
+        type="content",
+        platform="mastodon",
+        label=text[:120],
         metadata={
-            "score": record.get("score", 0),
-            "num_comments": record.get("num_comments", 0),
+            "reblogs": record.get("reblogs", 0),
+            "favourites": record.get("favourites", 0),
             "url": record.get("url"),
             "created_utc": record.get("created_utc"),
         },
     ))
 
     author = record.get("author")
-    if author and author != "[deleted]":
-        author_id = f"reddit:user:{author}"
-        es.nodes.append(Node(id=author_id, type="author", platform="reddit", label=author))
+    if author:
+        author_id = f"mastodon:user:{author}"
+        es.nodes.append(Node(id=author_id, type="author", platform="mastodon", label=author))
         es.edges.append(Edge(
             source_id=author_id,
             target_id=content_id,
             edge_type="authored",
-            platform="reddit",
+            platform="mastodon",
             timestamp=ts,
         ))
 
-    subreddit = record.get("subreddit")
-    if subreddit:
-        community_id = f"reddit:r:{subreddit}"
-        es.nodes.append(Node(
-            id=community_id,
-            type="community",
-            platform="reddit",
-            label=f"r/{subreddit}",
-        ))
+    for tag in record.get("tags", []):
+        tag_id = f"mastodon:tag:{tag.lower()}"
+        es.nodes.append(Node(id=tag_id, type="community", platform="mastodon", label=f"#{tag}"))
         es.edges.append(Edge(
             source_id=content_id,
-            target_id=community_id,
+            target_id=tag_id,
             edge_type="posted_to",
-            platform="reddit",
+            platform="mastodon",
             timestamp=ts,
         ))
 
-    title = record.get("title", "")
-    if title:
-        ent_nodes, ent_edges = _ner_nodes_and_edges(title, content_id, "reddit", ts)
+    if text:
+        ent_nodes, ent_edges = _ner_nodes_and_edges(text, content_id, "mastodon", ts)
         es.nodes.extend(ent_nodes)
         es.edges.extend(ent_edges)
 
@@ -220,22 +248,11 @@ def _extract_github(record: dict) -> EntitySet:
 
 
 _EXTRACTORS = {
-    "reddit": _extract_reddit,
+    "bluesky": _extract_bluesky,
+    "mastodon": _extract_mastodon,
     "hn": _extract_hn,
     "github": _extract_github,
 }
-
-
-def extract_entities(record: dict) -> list[Node | Edge]:
-    """
-    Flat list of Node and Edge objects, as expected by the consumer.
-    """
-    platform = record.get("platform", "")
-    extractor = _EXTRACTORS.get(platform)
-    if extractor is None:
-        return []
-    es = extractor(record)
-    return [*es.nodes, *es.edges]
 
 
 def extract_entity_set(record: dict) -> EntitySet:
