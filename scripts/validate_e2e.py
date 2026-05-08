@@ -75,7 +75,7 @@ async def check_db_schema(conn: asyncpg.Connection) -> bool:
 
 async def inject_anomaly(conn: asyncpg.Connection) -> tuple[int, str]:
     node_id = _rand_node_id()
-    platform = random.choice(["reddit", "hn", "github"])
+    platform = random.choice(["bluesky", "mastodon", "hn", "github"])
 
     # insert a node so propagation queries have something to find
     await conn.execute(
