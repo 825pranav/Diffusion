@@ -11,15 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Awaitable, Callable
 
 import aiohttp
 from llama_index.core.tools import FunctionTool
 
+from agent.types import Emitter
 from graph import embeddings as emb
 from graph import queries
-
-Emitter = Callable[[dict | None], Awaitable[None]]
 
 
 def build_tools(conn, session: aiohttp.ClientSession, emit: Emitter | None = None) -> list[FunctionTool]:

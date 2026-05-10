@@ -17,7 +17,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Awaitable, Callable
+from typing import Callable
 
 import aiohttp
 import asyncpg
@@ -28,14 +28,14 @@ from config import DB_URL, configure_logging
 from agent.confidence import apply_gate
 from agent.evaluator import evaluate_case
 from agent.tools import build_tools
+from agent.types import Emitter
 from graph import embeddings as emb
 from graph.models import ANOMALY_NOTIFY_CHANNEL
 from graph.queries import mark_anomaly_investigated
+
 MAX_AGENT_STEPS = int(os.getenv("AGENT_MAX_STEPS", "12"))
 
 log = logging.getLogger(__name__)
-
-Emitter = Callable[[dict | None], Awaitable[None]]
 
 _INVESTIGATION_PROMPT = (
     "You are an intelligence analyst investigating how a trending topic spread online.\n"
