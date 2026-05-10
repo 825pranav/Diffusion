@@ -1,23 +1,21 @@
+from __future__ import annotations
+
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-
-from dotenv import load_dotenv
-load_dotenv()
-
-import asyncio
 
 import aiohttp
 import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from config import DB_URL
 from agent.agent import agent_listener
 from api.routes import router
 from api.sse import publish as sse_publish, router as sse_router
 from api.websocket import graph_delta_listener, router as ws_router
 
-DB_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5432/diffusion").replace("postgresql+asyncpg://", "postgresql://")
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

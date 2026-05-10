@@ -14,13 +14,11 @@ import os
 import re
 from datetime import datetime, timezone
 
-from dotenv import load_dotenv
-load_dotenv()
-
 import aiohttp
 from aiokafka import AIOKafkaProducer
 
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
+from config import KAFKA_BROKER
+
 TOPIC = "mastodon-raw"
 MASTODON_INSTANCE = os.getenv("MASTODON_INSTANCE", "https://mastodon.social")
 POLL_INTERVAL = int(os.getenv("MASTODON_POLL_INTERVAL", "30"))  # seconds

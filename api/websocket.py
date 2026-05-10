@@ -10,12 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 
 import asyncpg
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-DB_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5432/diffusion").replace("postgresql+asyncpg://", "postgresql://")
+from config import DB_URL
 
 log = logging.getLogger(__name__)
 

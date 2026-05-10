@@ -3,9 +3,7 @@ import json
 import logging
 import os
 
-from dotenv import load_dotenv
-load_dotenv()
-
+from config import DB_URL, KAFKA_BROKER
 import asyncpg
 from aiokafka import AIOKafkaConsumer
 
@@ -15,8 +13,6 @@ from processing.entity_extractor import Node, Edge, extract_entity_set
 from processing.velocity_scorer import VelocityScorer
 from graph.queries import upsert_node, insert_edge
 
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5432/diffusion").replace("postgresql+asyncpg://", "postgresql://")
 TOPICS = ["bluesky-raw", "mastodon-raw", "hn-raw", "gh-raw"]
 GROUP_ID = os.getenv("KAFKA_GROUP_ID", "diffusion-processor")
 
@@ -66,7 +62,7 @@ async def main() -> None:
     dedup = DedupFilter()
     scorer = VelocityScorer()
     detector = AnomalyDetector()
-    db = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=5)
+    db = await asyncpg.create_pool(DB_URL, min_size=2, max_size=5)
     consumer = AIOKafkaConsumer(
         *TOPICS,
         bootstrap_servers=KAFKA_BROKER,

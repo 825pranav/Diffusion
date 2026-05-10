@@ -14,14 +14,13 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import random
 import string
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
-DB_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5432/diffusion")
+from config import DB_URL
 
 PLATFORMS = ["bluesky", "mastodon", "hn", "github"]
 EDGE_TYPES = ["repost", "comment", "reference", "share"]

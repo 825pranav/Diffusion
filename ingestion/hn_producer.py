@@ -11,13 +11,11 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from dotenv import load_dotenv
-load_dotenv()
-
 import aiohttp
 from aiokafka import AIOKafkaProducer
 
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
+from config import KAFKA_BROKER
+
 TOPIC = "hn-raw"
 HN_BASE = "https://hacker-news.firebaseio.com/v0"
 POLL_INTERVAL = int(os.getenv("HN_POLL_INTERVAL", "60"))  # seconds

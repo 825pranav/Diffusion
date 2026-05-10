@@ -24,14 +24,12 @@ from datetime import datetime, timezone
 
 import asyncpg
 
+from config import DB_URL
 from processing.velocity_scorer import VelocityScore
 
 ANOMALY_THRESHOLD = float(os.getenv("ANOMALY_Z_THRESHOLD", "2.5"))
 HISTORY_SIZE = int(os.getenv("ANOMALY_HISTORY_SIZE", "60"))
 MIN_SAMPLES = int(os.getenv("ANOMALY_MIN_SAMPLES", "5"))
-NOTIFY_CHANNEL = "anomaly_detected"
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5432/diffusion")
-
 log = logging.getLogger(__name__)
 
 
@@ -77,7 +75,7 @@ class AnomalyDetector:
     async def _get_db(self) -> asyncpg.Connection:
         async with self._db_lock:
             if self._db is None or self._db.is_closed():
-                self._db = await asyncpg.connect(DATABASE_URL)
+                self._db = await asyncpg.connect(DB_URL)
         return self._db
 
     async def _notify(self, event: AnomalyEvent) -> None:

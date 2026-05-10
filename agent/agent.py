@@ -24,14 +24,13 @@ import asyncpg
 from llama_index.core.agent import ReActAgent
 from llama_index.core.llms import LLM
 
+from config import DB_URL
 from agent.confidence import apply_gate
 from agent.evaluator import evaluate_case
 from agent.tools import build_tools
 from graph import embeddings as emb
 from graph.models import ANOMALY_NOTIFY_CHANNEL
 from graph.queries import mark_anomaly_investigated
-
-DB_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5432/diffusion").replace("postgresql+asyncpg://", "postgresql://")
 MAX_AGENT_STEPS = int(os.getenv("AGENT_MAX_STEPS", "12"))
 
 log = logging.getLogger(__name__)
