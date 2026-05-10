@@ -27,7 +27,13 @@ _PLATFORM_SHORT = {
 }
 
 
-def __norm_platform(p: str) -> str:
+BREAKING_ANOMALY_WINDOW_MINUTES = 15
+SPARKLINE_BUCKET_COUNT = 12
+TRAJECTORY_RISE_THRESHOLD = 10
+TRAJECTORY_COOL_THRESHOLD = -10
+
+
+def _norm_platform(p: str) -> str:
     return _PLATFORM_SHORT.get(p.lower(), p[:4])
 
 
@@ -98,7 +104,7 @@ async def get_trending(
             breaking AS (
                 SELECT DISTINCT node_id
                 FROM anomaly_events
-                WHERE detected_at >= now() - '15 minutes'::interval
+                WHERE detected_at >= now() - BREAKING_ANOMALY_WINDOW_MINUTES * interval '1 minute'
             )
             SELECT
                 nc.id,
@@ -129,7 +135,7 @@ async def get_trending(
                 "crossPlatform": 0, "breakingNow": 0,
             }}
 
-        # ── Sparkline: 12 buckets over the window per node ───────────────────
+        # ── Sparkline: SPARKLINE_BUCKET_COUNT buckets over the window per node ─
         node_ids = [r["id"] for r in rows]
         bucket_rows = await conn.fetch(
             """
@@ -139,7 +145,7 @@ async def get_trending(
                     EXTRACT(EPOCH FROM ingested_at),
                     EXTRACT(EPOCH FROM now() - $2 * interval '1 minute'),
                     EXTRACT(EPOCH FROM now()),
-                    12
+                    $3
                 ) AS bucket,
                 COUNT(*) AS cnt
             FROM graph_edges
@@ -148,7 +154,7 @@ async def get_trending(
             GROUP BY target_id, bucket
             ORDER BY target_id, bucket
             """,
-            node_ids, wm,
+            node_ids, wm, SPARKLINE_BUCKET_COUNT,
         )
 
         # Build sparkline map: node_id → [12 values]
@@ -156,7 +162,7 @@ async def get_trending(
         for br in bucket_rows:
             nid = br["node_id"]
             if nid not in sparkline_map:
-                sparkline_map[nid] = [0.0] * 12
+                sparkline_map[nid] = [0.0] * SPARKLINE_BUCKET_COUNT
             b = min(max(int(br["bucket"]) - 1, 0), 11)
             sparkline_map[nid][b] = float(br["cnt"])
 
@@ -206,9 +212,9 @@ async def get_trending(
                 vel_delta = 100
 
             trajectory = "plateau"
-            if vel_delta > 10:
+            if vel_delta > TRAJECTORY_RISE_THRESHOLD:
                 trajectory = "rising"
-            elif vel_delta < -10:
+            elif vel_delta < TRAJECTORY_COOL_THRESHOLD:
                 trajectory = "cooling"
 
             raw_platforms = r["platforms"] or [r["node_platform"]]
@@ -219,7 +225,7 @@ async def get_trending(
             if not platforms:
                 platforms = [_norm_platform(r["node_platform"])]
 
-            sparkline = sparkline_map.get(r["id"], [0.0] * 12)
+            sparkline = sparkline_map.get(r["id"], [0.0] * SPARKLINE_BUCKET_COUNT)
 
             prop_steps = [
                 {"platform": _norm_platform(s["platform"]), "minutesAgo": s["minutesAgo"]}

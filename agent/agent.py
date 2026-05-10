@@ -34,6 +34,8 @@ from graph.models import ANOMALY_NOTIFY_CHANNEL
 from graph.queries import mark_anomaly_investigated
 
 MAX_AGENT_STEPS = int(os.getenv("AGENT_MAX_STEPS", "12"))
+OLLAMA_REQUEST_TIMEOUT = 120.0   # seconds before Ollama inference is abandoned
+GROQ_RATE_LIMIT_SLEEP = 5        # seconds to wait between investigations to avoid 429s
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +65,7 @@ def _build_llm() -> LLM:
     return Ollama(
         model=chat_model,
         base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
-        request_timeout=120.0,
+        request_timeout=OLLAMA_REQUEST_TIMEOUT,
     )
 
 
@@ -214,7 +216,7 @@ async def agent_listener(emit_factory: Callable[[int], Emitter] | None = None) -
                 async with pool.acquire() as conn:
                     try:
                         await investigate(conn, session, event, emit=emit)
-                        await asyncio.sleep(5)  # avoid Groq rate limits between investigations
+                        await asyncio.sleep(GROQ_RATE_LIMIT_SLEEP)
                     except Exception:
                         log.exception("investigation failed for event %s", anomaly_id)
     finally:

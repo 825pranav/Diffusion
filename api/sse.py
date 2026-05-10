@@ -20,6 +20,8 @@ log = logging.getLogger(__name__)
 
 router = APIRouter()
 
+SSE_STREAM_TIMEOUT_SECONDS = 120.0
+
 # anomaly_id → active subscriber queues; None sentinel signals end-of-stream
 _bus: dict[int, list[asyncio.Queue]] = defaultdict(list)
 
@@ -51,7 +53,7 @@ async def _event_stream(anomaly_id: int) -> AsyncGenerator[str, None]:
     try:
         while True:
             try:
-                payload = await asyncio.wait_for(q.get(), timeout=120.0)
+                payload = await asyncio.wait_for(q.get(), timeout=SSE_STREAM_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
                 yield "event: timeout\ndata: {}\n\n"
                 break
