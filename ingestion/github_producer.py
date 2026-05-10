@@ -15,6 +15,7 @@ import aiohttp
 from aiokafka import AIOKafkaProducer
 
 from config import KAFKA_BROKER, configure_logging
+from ingestion.utils import BoundedSeenSet
 
 TOPIC = "gh-raw"
 GH_TOKEN = os.getenv("GITHUB_TOKEN", "")
@@ -47,7 +48,7 @@ def _serialize_event(event: dict) -> dict:
 async def produce(
     session: aiohttp.ClientSession,
     producer: AIOKafkaProducer,
-    seen: set,
+    seen: BoundedSeenSet,
 ) -> None:
     url = "https://api.github.com/events?per_page=100"
     try:
@@ -72,14 +73,10 @@ async def produce(
     if published:
         log.info("published %d new GitHub events", published)
 
-    if len(seen) > 10_000:
-        seen.difference_update(list(seen)[:5000])
-
-
 async def main() -> None:
     producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BROKER)
     await producer.start()
-    seen: set[str] = set()
+    seen: BoundedSeenSet = BoundedSeenSet()
     try:
         async with aiohttp.ClientSession() as session:
             while True:

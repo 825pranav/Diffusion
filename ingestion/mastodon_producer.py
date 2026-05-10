@@ -18,6 +18,7 @@ import aiohttp
 from aiokafka import AIOKafkaProducer
 
 from config import KAFKA_BROKER, configure_logging
+from ingestion.utils import BoundedSeenSet
 
 TOPIC = "mastodon-raw"
 MASTODON_INSTANCE = os.getenv("MASTODON_INSTANCE", "https://mastodon.social")
@@ -51,7 +52,7 @@ def _serialize(status: dict) -> dict:
     }
 
 
-async def produce(session: aiohttp.ClientSession, producer: AIOKafkaProducer, seen: set) -> None:
+async def produce(session: aiohttp.ClientSession, producer: AIOKafkaProducer, seen: BoundedSeenSet) -> None:
     url = f"{MASTODON_INSTANCE}/api/v1/timelines/public"
     params = {"limit": BATCH_SIZE, "local": "false"}
     try:
@@ -69,17 +70,13 @@ async def produce(session: aiohttp.ClientSession, producer: AIOKafkaProducer, se
             await producer.send_and_wait(TOPIC, json.dumps(record).encode())
         seen.add(status["id"])
 
-    # keep seen set bounded
-    if len(seen) > 10_000:
-        seen.difference_update(list(seen)[:4_000])
-
     log.info("published %d new statuses from %s", len(fresh), MASTODON_INSTANCE)
 
 
 async def main() -> None:
     producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BROKER)
     await producer.start()
-    seen: set[str] = set()
+    seen: BoundedSeenSet = BoundedSeenSet()
     try:
         async with aiohttp.ClientSession() as session:
             while True:

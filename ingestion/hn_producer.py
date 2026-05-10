@@ -15,6 +15,7 @@ import aiohttp
 from aiokafka import AIOKafkaProducer
 
 from config import KAFKA_BROKER, configure_logging
+from ingestion.utils import BoundedSeenSet
 
 TOPIC = "hn-raw"
 HN_BASE = "https://hacker-news.firebaseio.com/v0"
@@ -47,7 +48,7 @@ async def _fetch_item(session: aiohttp.ClientSession, item_id: int) -> dict | No
     }
 
 
-async def produce(session: aiohttp.ClientSession, producer: AIOKafkaProducer, seen: set) -> None:
+async def produce(session: aiohttp.ClientSession, producer: AIOKafkaProducer, seen: BoundedSeenSet) -> None:
     try:
         new_ids: list[int] = await _fetch_json(session, f"{HN_BASE}/newstories.json")
     except Exception:
@@ -71,14 +72,10 @@ async def produce(session: aiohttp.ClientSession, producer: AIOKafkaProducer, se
     if published:
         log.info("published %d new stories from HN", published)
 
-    if len(seen) > 5000:
-        seen.difference_update(list(seen)[:2000])
-
-
 async def main() -> None:
     producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BROKER)
     await producer.start()
-    seen: set[int] = set()
+    seen: BoundedSeenSet = BoundedSeenSet()
     try:
         async with aiohttp.ClientSession() as session:
             while True:
