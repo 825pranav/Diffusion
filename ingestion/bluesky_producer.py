@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 import aiohttp
 from aiokafka import AIOKafkaProducer
 
-from config import KAFKA_BROKER
+from config import KAFKA_BROKER, configure_logging
 
 TOPIC = "bluesky-raw"
 JETSTREAM_URL = os.getenv(
@@ -89,5 +89,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging()
     asyncio.run(main())

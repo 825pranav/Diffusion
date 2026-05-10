@@ -24,7 +24,7 @@ import asyncpg
 from llama_index.core.agent import ReActAgent
 from llama_index.core.llms import LLM
 
-from config import DB_URL
+from config import DB_URL, configure_logging
 from agent.confidence import apply_gate
 from agent.evaluator import evaluate_case
 from agent.tools import build_tools
@@ -228,5 +228,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging()
     asyncio.run(main())

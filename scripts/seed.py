@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
-from config import DB_URL
+from config import DB_URL, configure_logging
 
 PLATFORMS = ["bluesky", "mastodon", "hn", "github"]
 EDGE_TYPES = ["repost", "comment", "reference", "share"]
@@ -118,5 +118,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging()
     asyncio.run(main())

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 import aiohttp
 from aiokafka import AIOKafkaProducer
 
-from config import KAFKA_BROKER
+from config import KAFKA_BROKER, configure_logging
 
 TOPIC = "gh-raw"
 GH_TOKEN = os.getenv("GITHUB_TOKEN", "")
@@ -90,4 +90,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    configure_logging()
     asyncio.run(main())

@@ -10,7 +10,7 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from config import DB_URL
+from config import DB_URL, configure_logging
 from agent.agent import agent_listener
 from api.routes import router
 from api.sse import publish as sse_publish, router as sse_router
@@ -18,7 +18,7 @@ from api.websocket import graph_delta_listener, router as ws_router
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+configure_logging()
 
 
 def _make_emit(anomaly_id: int):

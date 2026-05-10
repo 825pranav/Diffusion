@@ -3,7 +3,7 @@ import json
 import logging
 import os
 
-from config import DB_URL, KAFKA_BROKER
+from config import DB_URL, KAFKA_BROKER, configure_logging
 import asyncpg
 from aiokafka import AIOKafkaConsumer
 
@@ -90,5 +90,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging()
     asyncio.run(main())

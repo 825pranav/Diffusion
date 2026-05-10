@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 import aiohttp
 from aiokafka import AIOKafkaProducer
 
-from config import KAFKA_BROKER
+from config import KAFKA_BROKER, configure_logging
 
 TOPIC = "hn-raw"
 HN_BASE = "https://hacker-news.firebaseio.com/v0"
@@ -89,4 +89,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    configure_logging()
     asyncio.run(main())
