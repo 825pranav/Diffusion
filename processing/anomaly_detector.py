@@ -13,18 +13,16 @@ before the oldest samples are evicted.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import math
 import os
 from collections import defaultdict, deque
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import asyncpg
 
-from config import DB_URL
 from processing.velocity_scorer import VelocityScore
 
 ANOMALY_THRESHOLD = float(os.getenv("ANOMALY_Z_THRESHOLD", "2.5"))
@@ -49,12 +47,13 @@ class AnomalyDetector:
     """
     Z-score spike detector with Postgres NOTIFY integration.
 
+    The caller is responsible for providing a connection on each evaluate()
+    call — the detector holds no DB state of its own.
+
     Usage:
         detector = AnomalyDetector()
-        event = await detector.evaluate(velocity_score, platform="reddit")
-        if event:
-            # spike detected — agent has already been notified via NOTIFY
-        await detector.close()
+        async with pool.acquire() as conn:
+            event = await detector.evaluate(conn, velocity_score, platform="hn")
     """
 
     def __init__(
@@ -69,18 +68,9 @@ class AnomalyDetector:
         self._history: dict[str, deque[float]] = defaultdict(
             lambda: deque(maxlen=history_size)
         )
-        self._db: asyncpg.Connection | None = None
-        self._db_lock = asyncio.Lock()
 
-    async def _get_db(self) -> asyncpg.Connection:
-        async with self._db_lock:
-            if self._db is None or self._db.is_closed():
-                self._db = await asyncpg.connect(DB_URL)
-        return self._db
-
-    async def _notify(self, event: AnomalyEvent) -> None:
+    async def _notify(self, conn: asyncpg.Connection, event: AnomalyEvent) -> None:
         try:
-            conn = await self._get_db()
             # INSERT triggers trg_anomaly_notify which fires NOTIFY automatically
             await conn.execute(
                 """
@@ -120,6 +110,7 @@ class AnomalyDetector:
 
     async def evaluate(
         self,
+        conn: asyncpg.Connection,
         score: VelocityScore,
         platform: str,
     ) -> AnomalyEvent | None:
@@ -153,9 +144,5 @@ class AnomalyDetector:
             detected_at=datetime.now(timezone.utc).isoformat(),
             window_seconds=score.window_seconds,
         )
-        await self._notify(event)
+        await self._notify(conn, event)
         return event
-
-    async def close(self) -> None:
-        if self._db and not self._db.is_closed():
-            await self._db.close()
