@@ -69,7 +69,7 @@ The core architectural decision: the agent does not poll. It sleeps until a stat
 
 | Technology | Role |
 |---|---|
-| **Kafka** | Event bus — streams raw signals from Reddit, HN, and GitHub |
+| **Kafka** | Event bus — streams raw signals from HN and GitHub |
 | **PostgreSQL** | Source of truth — propagation graph edges, case files, metadata |
 | **pgvector** | Vector search — semantic retrieval of historically similar trends |
 | **LlamaIndex** | Agent orchestration — stateful ReAct loop with tool calling |
