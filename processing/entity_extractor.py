@@ -17,6 +17,14 @@ from typing import Any
 
 import spacy
 
+from graph.ids import (
+    BLUESKY_CONTENT_PREFIX, BLUESKY_USER_PREFIX,
+    ENTITY_PREFIX,
+    GITHUB_REPO_PREFIX, GITHUB_USER_PREFIX,
+    HN_CONTENT_PREFIX, HN_USER_PREFIX,
+    MASTODON_CONTENT_PREFIX, MASTODON_TAG_PREFIX, MASTODON_USER_PREFIX,
+)
+
 _nlp: spacy.language.Language | None = None
 _NER_LABELS = {"ORG", "PRODUCT", "GPE", "PERSON"}
 
@@ -66,7 +74,7 @@ def _ner_nodes_and_edges(
     for ent in _get_nlp()(text).ents:
         if ent.label_ not in _NER_LABELS:
             continue
-        ent_id = f"entity:{ent.label_.lower()}:{ent.text.lower().replace(' ', '_')}"
+        ent_id = f"{ENTITY_PREFIX}{ent.label_.lower()}:{ent.text.lower().replace(' ', '_')}"
         if ent_id not in seen:
             nodes.append(Node(
                 id=ent_id,
@@ -90,7 +98,7 @@ def _extract_bluesky(record: dict) -> EntitySet:
     es = EntitySet()
     ts = record.get("ingested_at")
 
-    content_id = f"bluesky:{record['id']}"
+    content_id = f"{BLUESKY_CONTENT_PREFIX}{record['id']}"
     text = record.get("text", "")
     es.nodes.append(Node(
         id=content_id,
@@ -102,7 +110,7 @@ def _extract_bluesky(record: dict) -> EntitySet:
 
     author = record.get("author")
     if author:
-        author_id = f"bluesky:user:{author}"
+        author_id = f"{BLUESKY_USER_PREFIX}{author}"
         es.nodes.append(Node(id=author_id, type="author", platform="bluesky", label=author))
         es.edges.append(Edge(
             source_id=author_id,
@@ -124,7 +132,7 @@ def _extract_mastodon(record: dict) -> EntitySet:
     es = EntitySet()
     ts = record.get("ingested_at")
 
-    content_id = f"mastodon:{record['id']}"
+    content_id = f"{MASTODON_CONTENT_PREFIX}{record['id']}"
     text = record.get("text", "")
     es.nodes.append(Node(
         id=content_id,
@@ -141,7 +149,7 @@ def _extract_mastodon(record: dict) -> EntitySet:
 
     author = record.get("author")
     if author:
-        author_id = f"mastodon:user:{author}"
+        author_id = f"{MASTODON_USER_PREFIX}{author}"
         es.nodes.append(Node(id=author_id, type="author", platform="mastodon", label=author))
         es.edges.append(Edge(
             source_id=author_id,
@@ -152,7 +160,7 @@ def _extract_mastodon(record: dict) -> EntitySet:
         ))
 
     for tag in record.get("tags", []):
-        tag_id = f"mastodon:tag:{tag.lower()}"
+        tag_id = f"{MASTODON_TAG_PREFIX}{tag.lower()}"
         es.nodes.append(Node(id=tag_id, type="community", platform="mastodon", label=f"#{tag}"))
         es.edges.append(Edge(
             source_id=content_id,
@@ -174,7 +182,7 @@ def _extract_hn(record: dict) -> EntitySet:
     es = EntitySet()
     ts = record.get("ingested_at")
 
-    content_id = f"hn:{record['id']}"
+    content_id = f"{HN_CONTENT_PREFIX}{record['id']}"
     es.nodes.append(Node(
         id=content_id,
         type="content",
@@ -190,7 +198,7 @@ def _extract_hn(record: dict) -> EntitySet:
 
     author = record.get("by")
     if author:
-        author_id = f"hn:user:{author}"
+        author_id = f"{HN_USER_PREFIX}{author}"
         es.nodes.append(Node(id=author_id, type="author", platform="hn", label=author))
         es.edges.append(Edge(
             source_id=author_id,
@@ -214,7 +222,7 @@ def _extract_github(record: dict) -> EntitySet:
     ts = record.get("created_at") or record.get("ingested_at")
 
     repo = record.get("repo", "")
-    repo_id = f"github:repo:{repo}"
+    repo_id = f"{GITHUB_REPO_PREFIX}{repo}"
     es.nodes.append(Node(
         id=repo_id,
         type="repo",
@@ -228,7 +236,7 @@ def _extract_github(record: dict) -> EntitySet:
 
     actor = record.get("actor")
     if actor:
-        actor_id = f"github:user:{actor}"
+        actor_id = f"{GITHUB_USER_PREFIX}{actor}"
         es.nodes.append(Node(id=actor_id, type="author", platform="github", label=actor))
         edge_type = {
             "WatchEvent": "watched",

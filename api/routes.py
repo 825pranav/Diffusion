@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from graph.ids import GITHUB_REPO_PREFIX, HN_CONTENT_PREFIX
 from graph.queries import (
     get_cascade_size,
     get_node_degree,
@@ -245,14 +246,12 @@ async def get_trending(
                 except Exception:
                     meta = {}
             url = None
-            if node_type == "repo" and node_id.startswith("github:repo:"):
-                repo_name = node_id.removeprefix("github:repo:")
-                url = f"https://github.com/{repo_name}"
+            if node_type == "repo" and node_id.startswith(GITHUB_REPO_PREFIX):
+                url = f"https://github.com/{node_id.removeprefix(GITHUB_REPO_PREFIX)}"
             elif node_type == "content":
                 url = meta.get("url")
-                if not url and node_id.startswith("hn:"):
-                    hn_id = node_id.removeprefix("hn:")
-                    url = f"https://news.ycombinator.com/item?id={hn_id}"
+                if not url and node_id.startswith(HN_CONTENT_PREFIX):
+                    url = f"https://news.ycombinator.com/item?id={node_id.removeprefix(HN_CONTENT_PREFIX)}"
             elif node_type == "named_entity":
                 label = r["label"] or ""
                 url = f"https://hn.algolia.com/?q={label.replace(' ', '+')}"
