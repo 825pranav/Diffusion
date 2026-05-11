@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -69,17 +70,44 @@ def _build_llm() -> LLM:
     )
 
 
+_REQUIRED_KEYS = {"classification", "confidence", "signals", "reasoning_steps"}
+_VALID_CLASSIFICATIONS = {"organic", "coordinated_amplification", "uncertain"}
+
+
 def _parse_agent_response(raw: str) -> dict:
-    """Strip markdown fences and parse JSON from the agent's final response."""
+    """
+    Extract and validate the JSON object from the agent's final response.
+
+    Strips markdown code fences, then falls back to the first {...} block.
+    Raises ValueError if parsing fails or any required key is absent.
+    Returns a dict with all four keys coerced to their expected types so
+    the caller never needs defensive .get() with defaults.
+    """
     text = raw.strip()
-    if "```" in text:
-        parts = text.split("```")
-        text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start != -1 and end > start:
-        text = text[start:end]
-    return json.loads(text)
+
+    # Prefer a fenced block (```json ... ``` or ``` ... ```)
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fenced:
+        text = fenced.group(1)
+    elif "{" in text:
+        text = text[text.find("{") : text.rfind("}") + 1]
+
+    parsed = json.loads(text)
+
+    missing = _REQUIRED_KEYS - parsed.keys()
+    if missing:
+        raise ValueError(f"agent response missing keys: {missing}")
+
+    classification = str(parsed["classification"])
+    if classification not in _VALID_CLASSIFICATIONS:
+        classification = "uncertain"
+
+    return {
+        "classification": classification,
+        "confidence": float(parsed["confidence"]),
+        "signals": list(parsed["signals"]),
+        "reasoning_steps": list(parsed["reasoning_steps"]),
+    }
 
 
 async def investigate(
@@ -122,10 +150,10 @@ async def investigate(
         log.exception("agent failed to produce valid output for anomaly %s", anomaly_id)
         result = {"classification": "uncertain", "confidence": 0.0, "signals": [], "reasoning_steps": []}
 
-    classification: str = result.get("classification", "uncertain")
-    confidence: float = float(result.get("confidence", 0.0))
-    signals: list = result.get("signals", [])
-    reasoning_steps: list = result.get("reasoning_steps", [])
+    classification: str = result["classification"]
+    confidence: float = result["confidence"]
+    signals: list = result["signals"]
+    reasoning_steps: list = result["reasoning_steps"]
 
     needs_review = apply_gate(confidence)
 
