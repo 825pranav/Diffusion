@@ -59,7 +59,7 @@ htmlcov/
 .ipynb_checkpoints/
 
 # Node (frontend)
-!frontend/src/lib/
+frontend/
 node_modules/
 .next/
 out/

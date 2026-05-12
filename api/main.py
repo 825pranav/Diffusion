@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 import aiohttp
 import asyncpg
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import DB_URL, configure_logging
@@ -57,7 +57,11 @@ app.add_middleware(
 
 
 @app.get("/health")
-async def health():
+async def health(request: Request):
+    try:
+        await request.app.state.db.fetchval("SELECT 1")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"db unavailable: {exc}") from exc
     return {"status": "ok"}
 
 
