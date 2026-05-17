@@ -3,13 +3,11 @@
 
 *It's not about what's trending. It's about how and why it spread.*
 
-> New dashboard in `new-front` branch — bento layout, 4 palettes, full backend wiring.
-
 ---
 
 ## Overview
 
-Diffusion ingests live signals from Reddit, Hacker News, and GitHub, models how information spreads as a directed propagation graph, and deploys an autonomous LLM agent that activates only when anomalous spread patterns are detected. The agent investigates the pattern, retrieves semantically similar historical cases via vector search, and produces a structured **case file** classifying whether a trend spread organically or was coordinated.
+Diffusion ingests live signals from Bluesky, Mastodon, Hacker News, and GitHub, models how information spreads as a directed propagation graph, and deploys an autonomous LLM agent that activates only when anomalous spread patterns are detected. The agent investigates the pattern, retrieves semantically similar historical cases via vector search, and produces a structured **case file** classifying whether a trend spread organically or was coordinated.
 
 The core architectural decision: the agent does not poll. It sleeps until a statistically significant spike in propagation velocity triggers it. Everything downstream is a reaction to events, not a scheduled job.
 
@@ -18,49 +16,49 @@ The core architectural decision: the agent does not poll. It sleeps until a stat
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│           Ingestion Layer                   │
-│   Reddit (PRAW) · HN Firebase · GitHub API  │
-└──────────────────┬──────────────────────────┘
-                   │ async producers
-                   ▼
-┌─────────────────────────────────────────────┐
-│              Kafka                          │
-│   reddit-raw · hn-raw · gh-raw              │
-└──────────────────┬──────────────────────────┘
-                   │ async consumers
-                   ▼
-┌─────────────────────────────────────────────┐
-│         Stream Processing Layer             │
-│   Deduplication → Entity Extraction         │
-│   Velocity Scoring → Z-score Anomaly Det.   │
-└──────────────────┬──────────────────────────┘
-                   │ graph mutations + anomaly events
-                   ▼
-┌─────────────────────────────────────────────┐
-│         PostgreSQL + pgvector               │
-│   Propagation graph edges                   │
-│   Historical trend embeddings               │
-│   Case file store                           │
-└──────────────────┬──────────────────────────┘
-                   │ LISTEN/NOTIFY on anomaly
-                   ▼
-┌─────────────────────────────────────────────┐
-│         LlamaIndex ReAct Agent              │
-│   get_propagation_path                      │
-│   search_similar_trends (pgvector)          │
-│   classify_virality                         │
-│   confidence gate → case file               │
-│   Ragas evaluation on every output          │
-└──────────────────┬──────────────────────────┘
-                   │ REST · WebSocket · SSE
-                   ▼
-┌─────────────────────────────────────────────┐
-│         FastAPI + Next.js Dashboard         │
-│   Live trend timeline                       │
-│   Agent thought stream (SSE)                │
-│   Case file feed with confidence scores     │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│                  Ingestion Layer                    │
+│  Bluesky · Mastodon · HN Firebase · GitHub Events  │
+└────────────────────────┬────────────────────────────┘
+                         │ async producers
+                         ▼
+┌─────────────────────────────────────────────────────┐
+│                     Kafka                           │
+│   bluesky-raw · mastodon-raw · hn-raw · gh-raw      │
+└────────────────────────┬────────────────────────────┘
+                         │ async consumers
+                         ▼
+┌─────────────────────────────────────────────────────┐
+│            Stream Processing Layer                  │
+│   Deduplication → Entity Extraction (spaCy NER)     │
+│   Velocity Scoring → Z-score Anomaly Detection      │
+└────────────────────────┬────────────────────────────┘
+                         │ graph mutations + anomaly events
+                         ▼
+┌─────────────────────────────────────────────────────┐
+│              PostgreSQL + pgvector                  │
+│   Propagation graph edges                           │
+│   Historical trend embeddings                       │
+│   Case file store                                   │
+└────────────────────────┬────────────────────────────┘
+                         │ LISTEN/NOTIFY on anomaly
+                         ▼
+┌─────────────────────────────────────────────────────┐
+│            LlamaIndex ReAct Agent                   │
+│   get_propagation_path                              │
+│   search_similar_trends (pgvector)                  │
+│   classify_virality                                 │
+│   confidence gate → case file                       │
+│   Ragas evaluation on every output                  │
+└────────────────────────┬────────────────────────────┘
+                         │ REST · WebSocket · SSE
+                         ▼
+┌─────────────────────────────────────────────────────┐
+│            FastAPI + Next.js Dashboard              │
+│   Live trend timeline                               │
+│   Agent thought stream (SSE)                        │
+│   Case file feed with confidence scores             │
+└─────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -69,7 +67,7 @@ The core architectural decision: the agent does not poll. It sleeps until a stat
 
 | Technology | Role |
 |---|---|
-| **Kafka** | Event bus — streams raw signals from HN and GitHub |
+| **Kafka** | Event bus — streams raw signals from all four sources |
 | **PostgreSQL** | Source of truth — propagation graph edges, case files, metadata |
 | **pgvector** | Vector search — semantic retrieval of historically similar trends |
 | **LlamaIndex** | Agent orchestration — stateful ReAct loop with tool calling |
@@ -115,7 +113,7 @@ Every anomaly the agent investigates produces a structured case file:
   "signals": [
     "Repost rate increased 340% within a 4-minute window",
     "87% user overlap with a known amplification cluster",
-    "Cross-platform jump to Reddit r/programming within 6 minutes"
+    "Cross-platform jump to HN within 6 minutes"
   ],
   "similar_past_cases": [
     {
@@ -155,22 +153,26 @@ Triggering the agent on anomaly without polling required a clean handoff between
 ```
 diffusion/
 ├── ingestion/
-│   ├── reddit_producer.py       # PRAW async Kafka producer
+│   ├── bluesky_producer.py      # Bluesky async Kafka producer
+│   ├── mastodon_producer.py     # Mastodon API producer
 │   ├── hn_producer.py           # HN Firebase API producer
-│   └── github_producer.py       # GitHub Events API producer
+│   ├── github_producer.py       # GitHub Events API producer
+│   └── utils.py                 # Shared BoundedSeenSet, helpers
 ├── processing/
 │   ├── consumer.py              # Async Kafka consumer
 │   ├── dedup.py                 # Deduplication logic
-│   ├── entity_extractor.py      # Node and edge extraction
+│   ├── entity_extractor.py      # Node and edge extraction (spaCy NER)
 │   ├── velocity_scorer.py       # Rolling 5-minute rate-of-change
-│   └── anomaly_detector.py      # Z-score spike detection
+│   └── anomaly_detector.py      # Z-score spike detection + NOTIFY
 ├── graph/
 │   ├── models.py                # PostgreSQL schema
 │   ├── queries.py               # Propagation path, degree, cascade
-│   └── embeddings.py            # pgvector indexing and search
+│   ├── embeddings.py            # pgvector indexing and search
+│   └── ids.py                   # Node-ID prefix constants
 ├── agent/
 │   ├── agent.py                 # LlamaIndex ReAct agent
 │   ├── tools.py                 # Tool implementations
+│   ├── types.py                 # Shared type aliases
 │   ├── confidence.py            # Confidence gate
 │   └── evaluator.py             # Ragas evaluation pipeline
 ├── api/
@@ -178,6 +180,7 @@ diffusion/
 │   ├── routes.py                # REST endpoints
 │   ├── websocket.py             # Live graph delta stream
 │   └── sse.py                   # Agent thought stream
+├── config.py                    # Env vars, DB URL, logging setup
 ├── frontend/                    # Next.js dashboard
 ├── docker-compose.yml
 ├── requirements.txt
@@ -192,10 +195,10 @@ diffusion/
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/diffusion
+git clone https://github.com/825pranav/diffusion
 cd diffusion
 
-# Start infrastructure
+# Start infrastructure (Kafka + PostgreSQL)
 docker compose up -d
 
 # Install Python dependencies
@@ -220,7 +223,7 @@ Open `http://localhost:3000` to view the dashboard.
 **Validation and benchmarking:**
 
 ```bash
-# Seed synthetic graph data and fire anomaly events (wakes the agent if running)
+# Seed synthetic graph data and fire anomaly events
 python scripts/seed.py --nodes 30 --edges 60 --anomalies 2
 
 # End-to-end smoke test — injects an anomaly and waits for the agent to produce a case file
@@ -229,20 +232,6 @@ python scripts/validate_e2e.py --timeout 120
 # Latency benchmark — p50/p95/p99 across all read endpoints
 python scripts/benchmark.py --requests 200 --concurrency 10
 ```
-
----
-
-## Status
-
-| Stage | Description | Status |
-|---|---|---|
-| 1 | Ingestion pipeline — Kafka producers for Reddit, HN, GitHub | ✅ Done |
-| 2 | Stream processing — dedup, entity extraction, anomaly detection | ✅ Done |
-| 3 | Graph + vector layer — PostgreSQL schema, pgvector embeddings | ✅ Done |
-| 4 | Agent layer — LlamaIndex ReAct, tools, Ragas evaluation | ✅ Done |
-| 5a | API — FastAPI REST, WebSocket graph delta stream, SSE agent thought stream | ✅ Done |
-| 5b | Frontend — Next.js dashboard (live graph, case feed, SSE viewer) | ✅ Done |
-| 6 | Benchmarks, end-to-end validation, performance profiling | ✅ Done |
 
 ---
 
