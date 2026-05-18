@@ -15,14 +15,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 import statistics
 import time
 from dataclasses import dataclass, field
 
 import aiohttp
 
-DEFAULT_API_URL = os.getenv("API_URL", "http://localhost:8000")
+from config import configure_logging
+
+DEFAULT_API_URL = "http://localhost:8000"
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +57,9 @@ class Result:
 
 ENDPOINTS = [
     "/health",
+    "/trending?window=30m",
+    "/trending?window=2h",
+    "/trending?window=today",
     "/nodes?since_minutes=60&limit=20",
     "/anomalies?limit=20",
     "/anomalies?investigated=false&limit=20",
@@ -158,5 +162,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.WARNING)
+    configure_logging(logging.WARNING)
     asyncio.run(main())
