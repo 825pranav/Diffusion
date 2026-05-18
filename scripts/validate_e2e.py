@@ -19,7 +19,6 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import random
 import string
 import sys
@@ -29,7 +28,8 @@ from datetime import datetime, timezone
 import aiohttp
 import asyncpg
 
-DB_URL = os.getenv("DATABASE_URL", "postgresql://diffusion:diffusion@localhost:5432/diffusion")
+from config import DB_URL, configure_logging
+
 DEFAULT_API_URL = "http://localhost:8000"
 
 REQUIRED_TABLES = {"graph_nodes", "graph_edges", "anomaly_events", "case_files", "trend_embeddings"}
@@ -203,5 +203,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging()
     asyncio.run(main())
