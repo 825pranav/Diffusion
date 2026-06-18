@@ -15,6 +15,11 @@ class DedupFilter:
         self._order: deque[str] = deque()
         self._max = max_size
 
+    @property
+    def size(self) -> int:
+        """Number of entries currently in the seen-set."""
+        return len(self._seen)
+
     def is_new(self, record: dict) -> bool:
         if not record.get("id"):
             return False
