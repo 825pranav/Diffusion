@@ -69,6 +69,12 @@ class VelocityScorer:
                 scores.append(self._make_score(eid, bucket))
         return sorted(scores, key=lambda s: s.velocity, reverse=True)[:k]
 
+    def active_entities(self) -> list[str]:
+        """Return entity IDs that still have events in the current window."""
+        now = time.time()
+        cutoff = now - self._window
+        return [eid for eid, bucket in self._buckets.items() if bucket and bucket[-1] >= cutoff]
+
     def _evict(self, bucket: deque[float], now: float) -> None:
         cutoff = now - self._window
         while bucket and bucket[0] < cutoff:
