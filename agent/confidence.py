@@ -7,7 +7,9 @@ and excluded from the published feed until manually cleared.
 
 from __future__ import annotations
 
-CONFIDENCE_THRESHOLD = 0.65
+import os
+
+CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.65"))
 
 
 def apply_gate(confidence: float) -> bool:
