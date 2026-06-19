@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI):
     yield
     agent_task.cancel()
     delta_task.cancel()
+    await asyncio.gather(agent_task, delta_task, return_exceptions=True)
     await app.state.http.close()
     await app.state.db.close()
 
