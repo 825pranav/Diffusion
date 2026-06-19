@@ -93,7 +93,7 @@ async def _fetch_trending_rows(conn, wm: int, platform_filter: str | None):
         breaking AS (
             SELECT DISTINCT node_id
             FROM anomaly_events
-            WHERE detected_at >= now() - BREAKING_ANOMALY_WINDOW_MINUTES * interval '1 minute'
+            WHERE detected_at >= now() - {BREAKING_ANOMALY_WINDOW_MINUTES} * interval '1 minute'
         )
         SELECT
             nc.id,
