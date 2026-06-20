@@ -40,6 +40,7 @@ async def store_embedding(
         """
         INSERT INTO trend_embeddings (node_id, platform, embedding, model_name, model_version)
         VALUES ($1, $2, $3::vector, $4, $5)
+        ON CONFLICT (node_id, platform, model_name, model_version) DO NOTHING
         """,
         node_id, platform, str(vector), EMBEDDING_MODEL, EMBEDDING_VERSION,
     )
