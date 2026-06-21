@@ -1,6 +1,6 @@
 # Diffusion
 **Distributed Trend Propagation Engine**
-
+  
 *It's not about what's trending. It's about how and why it spread.*
 
 ---
