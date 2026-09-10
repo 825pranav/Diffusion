@@ -24,19 +24,19 @@ import logging
 import os
 import re
 import urllib.request
-from datetime import datetime, timezone
-from typing import Callable
+from collections.abc import Callable
+from datetime import UTC, datetime
 
 import aiohttp
 import asyncpg
 from llama_index.core.agent import ReActAgent
 from llama_index.core.llms import LLM
 
-from config import DB_URL, configure_logging
 from agent.confidence import apply_gate
 from agent.evaluator import evaluate_case
 from agent.tools import build_tools
 from agent.types import Emitter
+from config import DB_URL, configure_logging
 from graph import embeddings as emb
 from graph.models import ANOMALY_NOTIFY_CHANNEL
 from graph.queries import get_uninvestigated_anomalies, mark_anomaly_investigated
@@ -176,6 +176,40 @@ def _parse_agent_response(raw: str) -> dict:
     }
 
 
+async def run_investigation(
+    conn: asyncpg.Connection,
+    session: aiohttp.ClientSession,
+    node_id: str,
+    platform: str,
+    z_score: float = 0.0,
+    velocity: float = 0.0,
+    emit: Emitter | None = None,
+    include_model_tool: bool = True,
+) -> dict:
+    """
+    Run one bounded ReAct investigation and return the parsed verdict.
+
+    Reasoning only — no database writes and no case file. Separated from
+    investigate() so ml/evaluate.py can score the agent over a held-out set
+    without persisting hundreds of evaluation runs as real case files, and so
+    the model tool can be withheld to measure the LLM on its own.
+
+    Raises if the agent produces no parseable verdict; callers decide what that
+    means.
+    """
+    tools = build_tools(conn, session, emit=emit, include_model_tool=include_model_tool)
+    agent = ReActAgent.from_tools(
+        tools, llm=_build_llm(), max_iterations=MAX_AGENT_STEPS, verbose=False
+    )
+    query = (
+        f"{_INVESTIGATION_PROMPT}\n\n"
+        f"Investigate node '{node_id}' on platform '{platform}'. "
+        f"Z-score: {z_score:.2f}, velocity: {velocity:.2f}."
+    )
+    response = await agent.aquery(query)
+    return _parse_agent_response(str(response))
+
+
 async def investigate(
     conn: asyncpg.Connection,
     session: aiohttp.ClientSession,
@@ -200,18 +234,16 @@ async def investigate(
             "velocity": event.get("velocity", 0.0),
         })
 
-    tools = build_tools(conn, session, emit=emit)
-    agent = ReActAgent.from_tools(tools, llm=_build_llm(), max_iterations=MAX_AGENT_STEPS, verbose=False)
-
-    query = (
-        f"{_INVESTIGATION_PROMPT}\n\n"
-        f"Investigate node '{node_id}' on platform '{platform}'. "
-        f"Z-score: {event.get('z_score', 0.0):.2f}, velocity: {event.get('velocity', 0.0):.2f}."
-    )
-
     try:
-        response = await agent.aquery(query)
-        result = _parse_agent_response(str(response))
+        result = await run_investigation(
+            conn,
+            session,
+            node_id=node_id,
+            platform=platform,
+            z_score=event.get("z_score", 0.0),
+            velocity=event.get("velocity", 0.0),
+            emit=emit,
+        )
     except Exception:
         # Do not fabricate a case file.  Writing "uncertain / confidence 0.0" here
         # would publish an unsupported verdict and — because the anomaly would be
@@ -259,7 +291,7 @@ async def investigate(
         anomaly_id,
         node_id,
         platform,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         classification,
         confidence,
         json.dumps(signals),

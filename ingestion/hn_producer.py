@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import aiohttp
 from aiokafka import AIOKafkaProducer
@@ -44,7 +44,7 @@ async def _fetch_item(session: aiohttp.ClientSession, item_id: int) -> dict | No
         "by": data.get("by"),
         "descendants": data.get("descendants", 0),
         "created_utc": data.get("time"),
-        "ingested_at": datetime.now(timezone.utc).isoformat(),
+        "ingested_at": datetime.now(UTC).isoformat(),
     }
 
 

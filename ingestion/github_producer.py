@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import aiohttp
 from aiokafka import AIOKafkaProducer
@@ -41,7 +41,7 @@ def _serialize_event(event: dict) -> dict:
         "actor": event["actor"]["login"],
         "created_at": event.get("created_at"),
         "payload_action": event.get("payload", {}).get("action"),
-        "ingested_at": datetime.now(timezone.utc).isoformat(),
+        "ingested_at": datetime.now(UTC).isoformat(),
     }
 
 

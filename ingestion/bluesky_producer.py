@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import aiohttp
 from aiokafka import AIOKafkaProducer
@@ -52,7 +52,7 @@ def _serialize(msg: dict) -> dict | None:
         "author": did,
         "langs": langs,
         "created_utc": record.get("createdAt"),
-        "ingested_at": datetime.now(timezone.utc).isoformat(),
+        "ingested_at": datetime.now(UTC).isoformat(),
     }
 
 

@@ -12,28 +12,28 @@ cascades are held out for `ml/evaluate.py` and never seen here.
 
 | metric | mean | std | min | max |
 |---|---|---|---|---|
-| precision | 0.872 | 0.019 | 0.846 | 0.891 |
-| recall | 0.846 | 0.037 | 0.784 | 0.883 |
-| f1 | 0.859 | 0.026 | 0.819 | 0.883 |
-| roc_auc | 0.924 | 0.028 | 0.892 | 0.957 |
-| pr_auc | 0.938 | 0.021 | 0.912 | 0.960 |
+| precision | 0.875 | 0.017 | 0.848 | 0.892 |
+| recall | 0.833 | 0.032 | 0.784 | 0.870 |
+| f1 | 0.854 | 0.023 | 0.825 | 0.881 |
+| roc_auc | 0.921 | 0.026 | 0.891 | 0.954 |
+| pr_auc | 0.936 | 0.019 | 0.911 | 0.958 |
 
 ### Feature importance (gain)
 
 | feature | gain | share |
 |---|---|---|
-| time_to_half_s | 2,907 | 14.5% |
-| prior_author_mean | 2,875 | 14.3% |
-| cross_platform_edge_frac | 2,143 | 10.7% |
-| delay_median_s | 1,562 | 7.8% |
-| mean_children | 1,373 | 6.8% |
-| prior_author_max | 1,205 | 6.0% |
-| leaf_frac | 1,193 | 5.9% |
-| first_hop_lag_s | 1,104 | 5.5% |
-| root_fanout_share | 805 | 4.0% |
-| delay_cv | 619 | 3.1% |
-| duration_s | 600 | 3.0% |
-| delay_mean_s | 495 | 2.5% |
+| prior_author_mean | 2,935 | 14.6% |
+| time_to_half_s | 2,776 | 13.8% |
+| cross_platform_edge_frac | 2,137 | 10.6% |
+| mean_children | 1,410 | 7.0% |
+| leaf_frac | 1,390 | 6.9% |
+| delay_median_s | 1,240 | 6.2% |
+| prior_author_max | 1,204 | 6.0% |
+| first_hop_lag_s | 1,067 | 5.3% |
+| root_fanout_share | 812 | 4.0% |
+| delay_cv | 700 | 3.5% |
+| duration_s | 559 | 2.8% |
+| delay_mean_s | 553 | 2.7% |
 
 Reproduce with `python -m ml.train`.
 
@@ -58,3 +58,71 @@ of its cases.
 | `ewma` | 1,225 | 0.888 | 0.854 | 0.660 | 6.69 | 3.2 |
 
 Reproduce with `python -m ml.eval_anomaly`.
+
+## Filtered vector search — recall
+
+
+A 10,000-vector corpus in which the `(model_name, model_version)` filter keeps
+only the stated share of rows. Recall@5 is measured against a sequential scan,
+exact by construction, over 100 queries per row, with `hnsw.ef_search`
+pinned equal across both configurations so the comparison is about the filter and
+not about search effort.
+
+| filter keeps | shared recall@5 | shared rows | partial recall@5 | partial rows |
+|---|---|---|---|---|
+| 5% | 0.910 | 4.71 / 5 | 0.980 | 5.00 / 5 |
+| 10% | 1.000 | 5.00 / 5 | 0.872 | 5.00 / 5 |
+| 20% | 0.184 | 4.37 / 5 | 0.724 | 5.00 / 5 |
+
+The table-wide index never returns a full result set: it walks the graph unaware
+of the filter, and neighbours from the other model version are discarded *after*
+consuming the candidate budget. At 5% selectivity a query asking for 5 rows gets
+under 3. Nothing raises an error — `search_similar` simply returns a short,
+degraded list, which is why this survived until it was measured.
+
+A partial index returns the full 5 rows at every selectivity, because every row
+it contains already satisfies the predicate and the entire walk is usable.
+
+The table-wide index walks the graph without knowing about the filter, so
+neighbours from the other model version are found first and dropped afterwards.
+Nothing errors — the query just returns fewer and worse rows. A partial index
+contains only rows that already satisfy the predicate, so the entire walk counts.
+
+pgvector's `iterative_scan` addresses this generally but needs 0.8+; the bundled
+build is 0.6.2. A partial index is sufficient here because the filter is
+low-cardinality and known ahead of time. `graph.embeddings.ensure_partial_index`
+creates one for the active model version, and the background indexer calls it on
+startup.
+
+Reproduce with `python -m ml.eval_retrieval`.
+
+## Classifier vs LLM agent — held-out comparison
+
+
+All arms scored on the same temporally held-out split (400 cascades;
+the LLM arms are sampled from it, `n` below). Positive class = `coordinated`.
+
+| arm | n | precision | recall | F1 | ROC-AUC | Brier |
+|---|---|---|---|---|---|---|
+| `classifier` | 400 | 0.785 | 0.937 | 0.854 | 0.938 | 0.122 |
+
+![reliability diagram](reliability.png)
+
+Investigations that returned no parseable verdict: none. They are
+excluded rather than counted as wrong — each arm is measured on the answers it
+actually gives, and the count is reported so the omission stays visible.
+
+### Human-review gate
+
+`CONFIDENCE_THRESHOLD` was a guessed 0.65. Read off the classifier's reliability
+curve, the lowest gate whose retained predictions reach
+90% accuracy is **0.85**, which holds
+91.0% accuracy while auto-publishing
+74.8% of cases. The remainder goes to a human.
+
+Lowest rather than safest: every extra point of threshold buys accuracy by
+sending more cases to review, so the cheapest gate that clears the bar is the
+right one. Re-derive after any retrain — the number is a property of the fitted
+model, not a constant.
+
+Reproduce with `python -m ml.evaluate`.

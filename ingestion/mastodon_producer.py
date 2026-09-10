@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import aiohttp
 from aiokafka import AIOKafkaProducer
@@ -48,7 +48,7 @@ def _serialize(status: dict) -> dict:
         "favourites": status.get("favourites_count", 0),
         "url": status.get("url"),
         "created_utc": status.get("created_at"),
-        "ingested_at": datetime.now(timezone.utc).isoformat(),
+        "ingested_at": datetime.now(UTC).isoformat(),
     }
 
 

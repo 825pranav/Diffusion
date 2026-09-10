@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -44,7 +44,7 @@ def _window_minutes(window: str) -> int:
     if window == "2h":
         return 120
     if window == "today":
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return int((now.hour * 60 + now.minute) or 1)
     raise HTTPException(status_code=400, detail=f"invalid window: {window!r}; expected 30m, 2h, or today")
 

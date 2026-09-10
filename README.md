@@ -1,15 +1,19 @@
 # Diffusion
 **Distributed Trend Propagation Engine**
-  
+
 *It's not about what's trending. It's about how and why it spread.*
 
 ---
 
 ## Overview
 
-Diffusion ingests live signals from Bluesky, Mastodon, Hacker News, and GitHub, models how information spreads as a directed propagation graph, and deploys an autonomous LLM agent that activates only when anomalous spread patterns are detected. The agent investigates the pattern, retrieves semantically similar historical cases via vector search, and produces a structured **case file** classifying whether a trend spread organically or was coordinated.
+Diffusion ingests live signals from Bluesky, Mastodon, Hacker News, and GitHub, models how information spreads as a directed propagation graph, and deploys an autonomous LLM agent that activates only when anomalous spread patterns are detected. The agent investigates the pattern, scores the cascade with a trained classifier, retrieves semantically similar historical cases via vector search, and produces a structured **case file** classifying whether a trend spread organically or was coordinated.
 
-The core architectural decision: the agent does not poll. It sleeps until a statistically significant spike in propagation velocity triggers it. Everything downstream is a reaction to events, not a scheduled job.
+Two architectural decisions shape everything else:
+
+**The agent does not poll.** It sleeps until a statistically significant spike in propagation velocity triggers it. Everything downstream is a reaction to events, not a scheduled job. A backlog sweep sits behind that so a spike raised while the agent is down is still investigated rather than lost — Postgres `NOTIFY` is fire-and-forget and drops notifications with no live listener.
+
+**The verdict is measured, not asserted.** Real social data carries no ground-truth label for "organic vs coordinated", so a simulator generates labeled cascades and a LightGBM classifier is trained and evaluated against them. The agent calls that classifier as a tool. Every number in [`docs/results.md`](docs/results.md) is produced by a script in `ml/`.
 
 ---
 
@@ -18,7 +22,7 @@ The core architectural decision: the agent does not poll. It sleeps until a stat
 ```
 ┌─────────────────────────────────────────────────────┐
 │                  Ingestion Layer                    │
-│  Bluesky · Mastodon · HN Firebase · GitHub Events  │
+│  Bluesky · Mastodon · HN Firebase · GitHub Events   │
 └────────────────────────┬────────────────────────────┘
                          │ async producers
                          ▼
@@ -31,7 +35,8 @@ The core architectural decision: the agent does not poll. It sleeps until a stat
 ┌─────────────────────────────────────────────────────┐
 │            Stream Processing Layer                  │
 │   Deduplication → Entity Extraction (spaCy NER)     │
-│   Velocity Scoring → Z-score Anomaly Detection      │
+│   Velocity Scoring → Anomaly Detection              │
+│   (median/MAD · EWMA · z-score baselines)           │
 └────────────────────────┬────────────────────────────┘
                          │ graph mutations + anomaly events
                          ▼
@@ -40,25 +45,42 @@ The core architectural decision: the agent does not poll. It sleeps until a stat
 │   Propagation graph edges                           │
 │   Historical trend embeddings                       │
 │   Case file store                                   │
-└────────────────────────┬────────────────────────────┘
-                         │ LISTEN/NOTIFY on anomaly
-                         ▼
+└───────────┬─────────────────────────┬───────────────┘
+            │ LISTEN/NOTIFY           │ backlog sweep
+            │ (fast path)             │ (durability)
+            ▼                         ▼
 ┌─────────────────────────────────────────────────────┐
 │            LlamaIndex ReAct Agent                   │
 │   get_propagation_path                              │
 │   search_similar_trends (pgvector)                  │
-│   classify_virality                                 │
+│   classify_virality        (graph heuristics)       │
+│   classify_virality_model  (trained LightGBM)       │
 │   confidence gate → case file                       │
 │   Ragas evaluation on every output                  │
 └────────────────────────┬────────────────────────────┘
                          │ REST · WebSocket · SSE
                          ▼
 ┌─────────────────────────────────────────────────────┐
-│            FastAPI + Next.js Dashboard              │
-│   Live trend timeline                               │
+│                    FastAPI                          │
+│   Trend + case file endpoints                       │
 │   Agent thought stream (SSE)                        │
-│   Case file feed with confidence scores             │
+│   Live graph deltas (WebSocket)                     │
 └─────────────────────────────────────────────────────┘
+```
+
+Offline, feeding the classifier the agent calls:
+
+```
+simulation/  labeled cascades + diurnal background traffic
+     │
+     ▼
+ml/features   one recursive CTE → per-cascade structure, timing, author reuse
+     │
+     ▼
+ml/train      LightGBM, temporal split, 5-fold CV → models/
+     │
+     ▼
+ml/evaluate   classifier vs LLM vs hybrid, calibration, review gate
 ```
 
 ---
@@ -70,32 +92,35 @@ The core architectural decision: the agent does not poll. It sleeps until a stat
 | **Kafka** | Event bus — streams raw signals from all four sources |
 | **PostgreSQL** | Source of truth — propagation graph edges, case files, metadata |
 | **pgvector** | Vector search — semantic retrieval of historically similar trends |
+| **LightGBM** | Cascade classifier — the agent's strongest evidence |
 | **LlamaIndex** | Agent orchestration — stateful ReAct loop with tool calling |
-| **Groq** | LLM inference (primary) — LLaMA 3.3 70B |
-| **Ollama** | LLM inference (fallback) — local, zero cost, graceful degradation |
-| **Ragas** | Evaluation — retrieval relevance, reasoning consistency, confidence calibration |
+| **Groq** | LLM inference (primary), when a key serves the configured model |
+| **Ollama** | LLM inference (fallback) — local, zero cost, and the embedding backend |
+| **Ragas** | Retrieval and grounding scores on every case file |
 | **FastAPI** | Backend — REST, WebSocket, and SSE endpoints |
-| **Next.js** | Frontend dashboard |
-| **Docker** | Full stack containerization via `docker compose up` |
+| **Docker** | Kafka and Postgres via `docker compose up` (optional — see below) |
 
 ---
 
 ## Key Design Decisions
 
-**Event-driven, not poll-based.**
-The agent wakes only when the anomaly detector identifies a z-score deviation greater than 2.5 over a 5-minute rolling window. During quiet periods, inference cost is zero.
+**Event-driven, with a durable floor.**
+The agent wakes when the anomaly detector sees a spike, so inference cost is zero during quiet periods. `NOTIFY` alone would silently drop anomalies raised while the agent was down, restarting, or mid-failure, so a periodic sweep re-drives anything still marked uninvestigated. Both paths feed one queue, de-duplicated by anomaly id.
+
+**A robust anomaly baseline.**
+Mean and standard deviation are both dragged upward by the spikes they are meant to detect, so a sustained campaign progressively hides itself. The default baseline is median and scaled MAD, which does not move until half the history is contaminated. Measured on replayed traffic it cuts false alarms 3.5× against the plain z-score for seven points of recall — the right trade when every detection costs an LLM investigation and the sweep makes a missed spike recoverable.
 
 **Graph modeling in PostgreSQL.**
-Propagation relationships are stored as directed edges `(source_id, target_id, platform, timestamp)`. Degree, spread depth, and cascade size are computed via SQL — no dedicated graph DB required. Keeps the stack lean without sacrificing graph-theoretic reasoning.
+Propagation relationships are stored as directed edges. Degree, spread depth, and cascade size are computed in SQL — no dedicated graph DB. Feature extraction expands every cascade's reshare tree in a single recursive CTE rather than one query per cascade.
 
 **pgvector over a dedicated vector DB.**
-Historical trend embeddings live in the same Postgres instance as relational data. Relational queries and vector search run in the same transaction. Similarity search can be joined directly with graph queries in a single statement.
+Historical trend embeddings live in the same Postgres instance as relational data, so similarity search can be joined directly with graph queries.
 
 **Provider-agnostic LLM inference.**
-Groq is the primary provider (~200ms inference). If Groq rate-limits, the system automatically falls back to a local Ollama instance with no agent interruption. Fault tolerance is explicit, not assumed.
+Groq is preferred, with a local Ollama model behind it. The backend is probed once at startup — the key must work *and* serve the configured model — because a revoked key or a decommissioned model name would otherwise fail every investigation while a working local model sat idle.
 
 **Evaluation as a first-class concern.**
-Every case file produced by the agent is scored by Ragas across three dimensions: retrieval relevance, reasoning consistency, and confidence calibration. Agent quality is measurable, not just observable.
+The classifier is scored on a temporally held-out split against the LLM agent alone and the two combined. The human-review threshold is read off the reliability curve rather than guessed. Ragas scores retrieval relevance and grounding on each case file — note that these measure the *retrieval*, not confidence calibration, which comes from `ml/evaluate.py`.
 
 ---
 
@@ -111,40 +136,52 @@ Every anomaly the agent investigates produces a structured case file:
   "classification": "coordinated_amplification",
   "confidence": 0.84,
   "signals": [
-    "Repost rate increased 340% within a 4-minute window",
-    "87% user overlap with a known amplification cluster",
+    "Classifier p(coordinated) = 0.91, driven by root fan-out and author reuse",
+    "87% author overlap with earlier cascades on this topic",
     "Cross-platform jump to HN within 6 minutes"
   ],
   "similar_past_cases": [
-    {
-      "trend": "OSS library X",
-      "similarity": 0.91,
-      "outcome": "confirmed_coordinated"
-    }
+    { "trend": "OSS library X", "similarity": 0.91 }
   ],
   "ragas_scores": {
     "retrieval_relevance": 0.88,
     "reasoning_consistency": 0.82,
-    "confidence_calibration": 0.79
+    "answer_relevance": 0.79
   },
   "agent_reasoning_steps": 6
 }
 ```
 
-Case files with confidence below 0.65 are flagged for human review and not auto-published.
+Case files below the confidence gate are flagged for human review and withheld from the published feed. An investigation that produces no parseable verdict writes **nothing** and leaves the anomaly uninvestigated for the sweep to retry — publishing a fabricated "uncertain at 0.0" would assert a verdict nothing supports and hide the failure permanently.
+
+---
+
+## Results
+
+Full tables in [`docs/results.md`](docs/results.md), all regenerated by scripts.
+
+| What | Measured |
+|---|---|
+| Cascade classifier | F1 0.85, ROC-AUC 0.92 (5-fold CV, 2 000 simulated cascades) |
+| Anomaly baselines | median/MAD cuts false alarms 3.5× vs z-score at comparable delay |
+| Filtered vector search | table-wide HNSW returns under 3 of 5 requested rows at 5% selectivity; a partial index returns all 5 |
+| Review gate | 0.85, chosen from the reliability curve, not guessed |
 
 ---
 
 ## Engineering Challenges
 
+**Durable delivery on top of a fire-and-forget channel.**
+`LISTEN/NOTIFY` gives sub-second wakeups and no durability: Postgres discards notifications with no live listener, so any anomaly raised while the agent was down was lost for good. Adding a queue would have meant new infrastructure for a problem the database could already answer. Solved by sweeping `anomaly_events WHERE investigated = FALSE` on a timer, with NOTIFY kept as the fast path and an in-flight set so the sweep never re-enqueues work already running.
+
+**Filtered vector search silently loses recall.**
+`search_similar` filters on `(model_name, model_version)` and orders by distance. A single HNSW index spanning the table walks the graph unaware of that filter, so neighbours from other model versions are found first and discarded afterwards — consuming the candidate budget. At 5% selectivity a query asking for 5 rows gets under 3, with no error raised. pgvector's `iterative_scan` fixes this generally but needs 0.8+. Solved with one partial HNSW index per model version, so every row in the index already satisfies the predicate.
+
+**A benchmark that measures the generator instead of the problem.**
+The first simulator produced a classifier at F1 0.97 — a number that says the two populations were trivially separable, not that the task was solved. `hop_prob` and `root_attach` had been given non-overlapping ranges per class. Fixed by making every class-conditional parameter range straddle its counterpart, drawing target size from a shared distribution so raw size cannot leak the label, and generating a fraction of each class as a confusable subtype. A test now asserts the overlap so the easy dataset cannot come back.
+
 **Idempotent edge insertion under Kafka redelivery.**
-Kafka guarantees at-least-once delivery. A consumer crash mid-processing redelivers the same event, creating duplicate edges in the propagation graph and corrupting cascade size calculations. Solved with a composite unique constraint on `(source_id, target_id, platform, timestamp)` and `INSERT ... ON CONFLICT DO NOTHING` on every edge write.
-
-**Embedding consistency across model versions.**
-Trends embedded months apart may use different sentence-transformer checkpoints, making cosine similarity scores unreliable across time. Solved by storing `model_name` and `model_version` alongside every embedding and scoping all pgvector similarity searches to matching versions only.
-
-**Agent activation without a scheduler.**
-Triggering the agent on anomaly without polling required a clean handoff between the stream processing layer and the agent. Solved with a Postgres `LISTEN/NOTIFY` channel — the anomaly detector writes to a notify channel, and the agent process wakes on receive. No external queue, no polling loop.
+Kafka guarantees at-least-once delivery, so a consumer crash mid-processing redelivers the same event and duplicates edges. Solved with a composite unique constraint on `(source_id, target_id, platform, ts)` and `ON CONFLICT DO NOTHING` on every edge write.
 
 ---
 
@@ -152,84 +189,94 @@ Triggering the agent on anomaly without polling required a clean handoff between
 
 ```
 diffusion/
-├── ingestion/
-│   ├── bluesky_producer.py      # Bluesky async Kafka producer
-│   ├── mastodon_producer.py     # Mastodon API producer
-│   ├── hn_producer.py           # HN Firebase API producer
-│   ├── github_producer.py       # GitHub Events API producer
-│   └── utils.py                 # Shared BoundedSeenSet, helpers
-├── processing/
-│   ├── consumer.py              # Async Kafka consumer
-│   ├── dedup.py                 # Deduplication logic
-│   ├── entity_extractor.py      # Node and edge extraction (spaCy NER)
-│   ├── velocity_scorer.py       # Rolling 5-minute rate-of-change
-│   └── anomaly_detector.py      # Z-score spike detection + NOTIFY
-├── graph/
-│   ├── models.py                # PostgreSQL schema
-│   ├── queries.py               # Propagation path, degree, cascade
-│   ├── embeddings.py            # pgvector indexing and search
-│   └── ids.py                   # Node-ID prefix constants
-├── agent/
-│   ├── agent.py                 # LlamaIndex ReAct agent
-│   ├── tools.py                 # Tool implementations
-│   ├── types.py                 # Shared type aliases
-│   ├── confidence.py            # Confidence gate
-│   └── evaluator.py             # Ragas evaluation pipeline
-├── api/
-│   ├── main.py                  # FastAPI application
-│   ├── routes.py                # REST endpoints
-│   ├── websocket.py             # Live graph delta stream
-│   └── sse.py                   # Agent thought stream
-├── config.py                    # Env vars, DB URL, logging setup
-├── frontend/                    # Next.js dashboard
-├── docker-compose.yml
-├── requirements.txt
-└── README.md
+├── ingestion/          # one async Kafka producer per platform
+├── processing/         # dedup, spaCy NER extraction, velocity, anomaly baselines
+├── graph/              # schema, propagation queries, pgvector embeddings
+├── agent/              # ReAct agent, tools, confidence gate, Ragas evaluation
+├── api/                # FastAPI app, REST routes, WebSocket, SSE
+├── simulation/         # labeled cascade generator + diurnal background traffic
+│   ├── cascade.py      #   one growth engine, two parameterisations
+│   ├── background.py   #   non-cascade chatter, so FP rate is measurable
+│   └── generate.py     #   CLI: writes graph rows + labels.csv
+├── ml/                 # the measured layer
+│   ├── features.py     #   per-cascade features (recursive CTE + pandas)
+│   ├── dataset.py      #   ground truth join, temporal split
+│   ├── train.py        #   LightGBM + cross-validation
+│   ├── predict.py      #   inference for the agent tool
+│   ├── evaluate.py     #   classifier vs LLM vs hybrid, calibration
+│   ├── eval_anomaly.py #   anomaly baseline replay comparison
+│   └── eval_retrieval.py #  filtered vector search recall
+├── tests/              # pure unit tests, no external services
+├── scripts/            # devdb, seed, end-to-end validation, benchmark
+├── docs/results.md     # every measured number
+└── docker-compose.yml
 ```
 
 ---
 
 ## Running Locally
 
-**Prerequisites:** Docker Desktop, Python 3.11+, Node.js 18+
+**Prerequisites:** Python 3.11+, and either Docker or nothing at all (see below).
 
 ```bash
-# Clone the repository
 git clone https://github.com/825pranav/diffusion
 cd diffusion
 
-# Start infrastructure (Kafka + PostgreSQL)
-docker compose up -d
-
-# Install Python dependencies
-pip install -r requirements.txt
-
-# Install frontend dependencies
-cd frontend && npm install && cd ..
-
-# Start the backend
-uvicorn api.main:app --reload
-
-# Start the frontend
-cd frontend && npm run dev
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt          # .venv/Scripts/pip on Windows
+python -m spacy download en_core_web_sm
 ```
 
-Open `http://localhost:3000` to view the dashboard.
+### Database
 
-**Services started by Docker Compose:**
-- Kafka + Zookeeper → `localhost:9092`
-- PostgreSQL + pgvector → `localhost:5432`
-
-**Validation and benchmarking:**
+Docker is optional. The `pgserver` wheel bundles a self-contained PostgreSQL 16 with pgvector, which is enough to run the real schema:
 
 ```bash
-# Seed synthetic graph data and fire anomaly events
-python scripts/seed.py --nodes 30 --edges 60 --anomalies 2
+python -m scripts.devdb start    # starts Postgres, creates the schema,
+                                 # writes DATABASE_URL into .env
+```
 
-# End-to-end smoke test — injects an anomaly and waits for the agent to produce a case file
-python scripts/validate_e2e.py --timeout 120
+`devdb` also takes `url`, `stop`, and `reset`. It binds a dynamic port and rewrites `DATABASE_URL`, so `config.DB_URL` works unchanged.
 
-# Latency benchmark — p50/p95/p99 across all read endpoints
+To use the compose stack instead, `docker compose up -d` and set `DATABASE_URL` yourself. Compose is the only way to get Kafka, which the live ingestion path needs.
+
+### LLM
+
+Set `GROQ_API_KEY` in `.env` for hosted inference, or run everything locally:
+
+```bash
+ollama pull qwen2.5:7b        # agent reasoning
+ollama pull nomic-embed-text  # embeddings (768-dim, matches the schema)
+```
+
+The agent probes Groq once and falls back to Ollama if the key is missing, rejected, or does not serve `GROQ_MODEL`.
+
+### Run it
+
+```bash
+uvicorn api.main:app --reload     # API + agent listener + embedding indexer
+python -m processing.consumer     # stream processor (needs Kafka)
+python -m ingestion.hn_producer   # one producer per platform (needs Kafka)
+```
+
+### The ML pipeline
+
+```bash
+python -m simulation.generate --n 2000 --truncate   # labeled cascades + background
+python -m ml.train                                  # LightGBM + 5-fold CV
+python -m ml.evaluate --skip-llm                    # classifier arm + review gate
+python -m ml.evaluate --llm-sample 24               # all three arms (slow)
+python -m ml.eval_anomaly                           # baseline comparison
+python -m ml.eval_retrieval                         # filtered search recall
+```
+
+Each writes its own section of `docs/results.md`.
+
+### Validation
+
+```bash
+pytest                                    # unit tests, no services needed
+python scripts/validate_e2e.py            # end-to-end against a running stack
 python scripts/benchmark.py --requests 200 --concurrency 10
 ```
 

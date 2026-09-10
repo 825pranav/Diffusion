@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 from collections import defaultdict
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
@@ -54,7 +54,7 @@ async def _event_stream(anomaly_id: int) -> AsyncGenerator[str, None]:
         while True:
             try:
                 payload = await asyncio.wait_for(q.get(), timeout=SSE_STREAM_TIMEOUT_SECONDS)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 yield "event: timeout\ndata: {}\n\n"
                 break
             if payload is None:

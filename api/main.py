@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -10,11 +9,13 @@ import asyncpg
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from config import DB_URL, configure_logging
 from agent.agent import agent_listener
 from api.routes import router
-from api.sse import publish as sse_publish, router as sse_router
-from api.websocket import graph_delta_listener, router as ws_router
+from api.sse import publish as sse_publish
+from api.sse import router as sse_router
+from api.websocket import graph_delta_listener
+from api.websocket import router as ws_router
+from config import DB_URL, configure_logging
 from graph import embeddings
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")

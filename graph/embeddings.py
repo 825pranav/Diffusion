@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import Any
 
 import aiohttp
@@ -24,6 +25,51 @@ INDEXER_INTERVAL_SECONDS = int(os.getenv("EMBEDDING_INDEXER_INTERVAL", "30"))
 INDEXER_BATCH_SIZE = int(os.getenv("EMBEDDING_INDEXER_BATCH", "50"))
 
 log = logging.getLogger(__name__)
+
+
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]+$")
+
+
+def _index_name(model_name: str, model_version: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", f"{model_name}_{model_version}".lower()).strip("_")
+    return f"idx_trend_emb_hnsw_{slug}"
+
+
+async def ensure_partial_index(
+    conn,
+    model_name: str = EMBEDDING_MODEL,
+    model_version: str = EMBEDDING_VERSION,
+) -> str:
+    """
+    Create the HNSW index covering exactly one embedding model version.
+
+    search_similar filters on (model_name, model_version) and orders by distance.
+    A single HNSW index over the whole table cannot serve that: the index walk
+    returns the globally nearest vectors and the filter is applied *afterwards*,
+    so neighbours belonging to other model versions consume the result budget and
+    the query silently returns fewer — or worse — rows than asked for. The effect
+    grows with the share of the table the filter excludes.
+
+    pgvector's `iterative_scan`, which fixes this in general, needs 0.8+; the
+    bundled build is 0.6.2. A partial index does the job here because the filter
+    is low-cardinality and known in advance: every row in the index already
+    satisfies the predicate, so the whole walk is usable.
+
+    ml/eval_retrieval.py measures the difference.
+    """
+    if not (_SAFE_IDENTIFIER.match(model_name) and _SAFE_IDENTIFIER.match(model_version)):
+        raise ValueError(
+            f"unsafe embedding identifiers for DDL: {model_name!r}, {model_version!r}"
+        )
+    name = _index_name(model_name, model_version)
+    await conn.execute(
+        f"""
+        CREATE INDEX IF NOT EXISTS {name}
+        ON trend_embeddings USING hnsw (embedding vector_cosine_ops)
+        WHERE model_name = '{model_name}' AND model_version = '{model_version}'
+        """
+    )
+    return name
 
 
 async def embed(text: str, session: aiohttp.ClientSession) -> list[float]:
@@ -136,9 +182,15 @@ async def indexer_loop(
     Failures are logged and retried on the next tick — an unreachable embedding
     backend degrades similarity search, it does not stop the pipeline.
     """
+    index_ready = False
     while True:
         try:
             async with pool.acquire() as conn:
+                if not index_ready:
+                    # Cheap and idempotent, but needs a connection, so it happens
+                    # here rather than at import time.
+                    await ensure_partial_index(conn)
+                    index_ready = True
                 embedded = await embed_unindexed_nodes(
                     conn, session, batch_size=batch_size
                 )

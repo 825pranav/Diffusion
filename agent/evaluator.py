@@ -2,9 +2,16 @@
 Ragas evaluation pipeline for Diffusion case files.
 
 Scores each agent output on three dimensions:
-  retrieval_relevance    — are the retrieved similar cases relevant to the anomaly?
-  reasoning_consistency  — is the classification grounded in the retrieved evidence?
-  confidence_calibration — does the answer directly address the investigation question?
+  retrieval_relevance   — are the retrieved similar cases relevant to the anomaly?
+  reasoning_consistency — is the classification grounded in the retrieved evidence?
+  answer_relevance      — does the answer directly address the investigation question?
+
+These score the *retrieval and grounding* of an investigation. None of them is a
+calibration measure: Ragas answer_relevancy asks whether the response addresses
+the question, which says nothing about whether a stated confidence of 0.84 is
+right 84% of the time. This field was previously named confidence_calibration,
+which claimed exactly that. Real calibration — Brier score, a reliability curve,
+and the review threshold derived from it — comes from ml/evaluate.py.
 
 Evaluation is best-effort: if the Ragas pipeline fails (missing API key,
 rate limit, empty contexts) the function returns zero scores rather than
@@ -40,7 +47,7 @@ async def evaluate_case(
         return {
             "retrieval_relevance": 0.0,
             "reasoning_consistency": 0.0,
-            "confidence_calibration": 0.0,
+            "answer_relevance": 0.0,
         }
 
 
@@ -76,5 +83,5 @@ def _run_ragas(
     return {
         "retrieval_relevance": float(result["context_precision"]),
         "reasoning_consistency": float(result["faithfulness"]),
-        "confidence_calibration": float(result["answer_relevancy"]),
+        "answer_relevance": float(result["answer_relevancy"]),
     }

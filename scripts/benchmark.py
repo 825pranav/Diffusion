@@ -126,7 +126,7 @@ async def run(api_url: str, n_requests: int, concurrency: int) -> None:
             log.error("API unreachable: %s", exc)
             return
 
-        print(f"\nDiffusion API Benchmark")
+        print("\nDiffusion API Benchmark")
         print(f"  target      : {api_url}")
         print(f"  requests    : {n_requests} per endpoint")
         print(f"  concurrency : {concurrency}")

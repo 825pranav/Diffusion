@@ -18,7 +18,7 @@ import pathlib
 import random
 import string
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import asyncpg
 
@@ -40,7 +40,7 @@ def rand_id(prefix: str = "node") -> str:
 
 def rand_ts(minutes_ago_max: int = 120) -> datetime:
     offset = random.randint(0, minutes_ago_max * 60)
-    return datetime.now(timezone.utc) - timedelta(seconds=offset)
+    return datetime.now(UTC) - timedelta(seconds=offset)
 
 
 async def seed(conn: asyncpg.Connection, n_nodes: int, n_edges: int, n_anomalies: int) -> None:

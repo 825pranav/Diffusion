@@ -11,18 +11,22 @@ The model is loaded once at first call and reused — no GPU required.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
 import spacy
 
 from graph.ids import (
-    BLUESKY_CONTENT_PREFIX, BLUESKY_USER_PREFIX,
+    BLUESKY_CONTENT_PREFIX,
+    BLUESKY_USER_PREFIX,
     ENTITY_PREFIX,
-    GITHUB_REPO_PREFIX, GITHUB_USER_PREFIX,
-    HN_CONTENT_PREFIX, HN_USER_PREFIX,
-    MASTODON_CONTENT_PREFIX, MASTODON_TAG_PREFIX, MASTODON_USER_PREFIX,
+    GITHUB_REPO_PREFIX,
+    GITHUB_USER_PREFIX,
+    HN_CONTENT_PREFIX,
+    HN_USER_PREFIX,
+    MASTODON_CONTENT_PREFIX,
+    MASTODON_TAG_PREFIX,
+    MASTODON_USER_PREFIX,
 )
 
 _nlp: spacy.language.Language | None = None

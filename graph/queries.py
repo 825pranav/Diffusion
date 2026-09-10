@@ -18,9 +18,8 @@ Queries:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
-
 
 # ── writes ────────────────────────────────────────────────────────────────────
 
@@ -52,9 +51,9 @@ async def insert_edge(
         try:
             ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except (ValueError, AttributeError):
-            ts = datetime.now(timezone.utc)
+            ts = datetime.now(UTC)
     elif ts is None:
-        ts = datetime.now(timezone.utc)
+        ts = datetime.now(UTC)
 
     await conn.execute(
         """

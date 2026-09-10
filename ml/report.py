@@ -10,7 +10,7 @@ stack duplicate, conflicting tables in the same file.
 from __future__ import annotations
 
 import pathlib
-from typing import Sequence
+from collections.abc import Sequence
 
 RESULTS_PATH = pathlib.Path(__file__).resolve().parent.parent / "docs" / "results.md"
 

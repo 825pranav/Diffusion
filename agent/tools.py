@@ -26,11 +26,20 @@ from graph import queries
 from ml.predict import score_cascade
 
 
-def build_tools(conn, session: aiohttp.ClientSession, emit: Emitter | None = None) -> list[FunctionTool]:
+def build_tools(
+    conn,
+    session: aiohttp.ClientSession,
+    emit: Emitter | None = None,
+    include_model_tool: bool = True,
+) -> list[FunctionTool]:
     """
     Return the agent tools bound to an open DB connection and HTTP session.
     Call once per investigation — do not share across concurrent runs.
     If emit is provided it will be called with tool_call/tool_result events.
+
+    include_model_tool=False withholds classify_virality_model, which is what
+    ml/evaluate.py needs to measure the LLM on its own rather than measuring the
+    classifier through it.
     """
 
     async def _call(tool: str, **args) -> None:
@@ -112,7 +121,7 @@ def build_tools(conn, session: aiohttp.ClientSession, emit: Emitter | None = Non
         """Sync stub — agent always uses the async variant."""
         raise NotImplementedError
 
-    return [
+    tools = [
         FunctionTool.from_defaults(
             fn=_sync_stub,
             async_fn=get_propagation_path,
@@ -140,6 +149,12 @@ def build_tools(conn, session: aiohttp.ClientSession, emit: Emitter | None = Non
                 "Use to quantify spread velocity and network centrality."
             ),
         ),
+    ]
+
+    if not include_model_tool:
+        return tools
+
+    tools.append(
         FunctionTool.from_defaults(
             fn=_sync_stub,
             async_fn=classify_virality_model,
@@ -151,5 +166,6 @@ def build_tools(conn, session: aiohttp.ClientSession, emit: Emitter | None = Non
                 "prefer it over reasoning from raw counts, but state the "
                 "probability alongside your own reading of the other tools."
             ),
-        ),
-    ]
+        )
+    )
+    return tools

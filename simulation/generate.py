@@ -22,7 +22,7 @@ import json
 import logging
 import pathlib
 import sys
-from typing import Iterable
+from collections.abc import Iterable
 
 import asyncpg
 import numpy as np

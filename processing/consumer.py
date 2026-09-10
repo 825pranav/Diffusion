@@ -3,15 +3,15 @@ import json
 import logging
 import os
 
-from config import DB_URL, KAFKA_BROKER, configure_logging
 import asyncpg
 from aiokafka import AIOKafkaConsumer
 
+from config import DB_URL, KAFKA_BROKER, configure_logging
+from graph.queries import insert_edge, upsert_node
 from processing.anomaly_detector import AnomalyDetector
 from processing.dedup import DedupFilter
-from processing.entity_extractor import Node, Edge, extract_entity_set
+from processing.entity_extractor import extract_entity_set
 from processing.velocity_scorer import VelocityScorer
-from graph.queries import upsert_node, insert_edge
 
 TOPICS = ["bluesky-raw", "mastodon-raw", "hn-raw", "gh-raw"]
 GROUP_ID = os.getenv("KAFKA_GROUP_ID", "diffusion-processor")

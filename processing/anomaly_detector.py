@@ -24,13 +24,12 @@ before the oldest samples are evicted.
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import os
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import asyncpg
 
@@ -244,7 +243,7 @@ class AnomalyDetector:
             current_velocity=round(score.velocity, 4),
             baseline_mean=round(centre, 4),
             baseline_std=round(scale, 4),
-            detected_at=(now or datetime.now(timezone.utc)).isoformat(),
+            detected_at=(now or datetime.now(UTC)).isoformat(),
             window_seconds=score.window_seconds,
         )
 
