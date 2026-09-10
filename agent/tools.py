@@ -1,10 +1,15 @@
 """
 LlamaIndex FunctionTools for the Diffusion ReAct agent.
 
-Three tools:
-  get_propagation_path   — BFS traversal from a root node, up to max_depth hops
-  search_similar_trends  — pgvector cosine similarity over stored trend embeddings
-  classify_virality      — cascade size + in/out degree features for a node
+Four tools:
+  get_propagation_path     — BFS traversal from a root node, up to max_depth hops
+  search_similar_trends    — pgvector cosine similarity over stored trend embeddings
+  classify_virality        — cascade size + in/out degree features for a node
+  classify_virality_model  — trained LightGBM probability the cascade was coordinated
+
+classify_virality is kept alongside the model: it needs no training artefact and
+still works on nodes that have no reshare cascade, which is where the model
+declines to answer.
 """
 
 from __future__ import annotations
@@ -18,11 +23,12 @@ from llama_index.core.tools import FunctionTool
 from agent.types import Emitter
 from graph import embeddings as emb
 from graph import queries
+from ml.predict import score_cascade
 
 
 def build_tools(conn, session: aiohttp.ClientSession, emit: Emitter | None = None) -> list[FunctionTool]:
     """
-    Return the three agent tools bound to an open DB connection and HTTP session.
+    Return the agent tools bound to an open DB connection and HTTP session.
     Call once per investigation — do not share across concurrent runs.
     If emit is provided it will be called with tool_call/tool_result events.
     """
@@ -77,6 +83,31 @@ def build_tools(conn, session: aiohttp.ClientSession, emit: Emitter | None = Non
             "out_degree": degree["out_degree"],
         })
 
+    async def classify_virality_model(node_id: str) -> str:
+        """
+        Score the cascade with the trained LightGBM classifier.
+        Returns JSON: {p_coordinated, cascade_size, top_features}.
+        p_coordinated near 1.0 means coordinated amplification, near 0.0 organic.
+        """
+        await _call("classify_virality_model", node_id=node_id)
+        result = await score_cascade(conn, node_id)
+        if result is None:
+            await _result("classify_virality_model", "unavailable")
+            return json.dumps(
+                {
+                    "available": False,
+                    "reason": (
+                        "no trained model, or this node has no reshare cascade. "
+                        "Fall back to classify_virality."
+                    ),
+                }
+            )
+        await _result(
+            "classify_virality_model",
+            f"p_coordinated={result['p_coordinated']:.3f}",
+        )
+        return json.dumps(result)
+
     def _sync_stub(*args, **kwargs):
         """Sync stub — agent always uses the async variant."""
         raise NotImplementedError
@@ -107,6 +138,18 @@ def build_tools(conn, session: aiohttp.ClientSession, emit: Emitter | None = Non
             description=(
                 "Compute cascade size and degree metrics for a node. "
                 "Use to quantify spread velocity and network centrality."
+            ),
+        ),
+        FunctionTool.from_defaults(
+            fn=_sync_stub,
+            async_fn=classify_virality_model,
+            name="classify_virality_model",
+            description=(
+                "Score the cascade with a trained classifier and get the "
+                "probability it was coordinated, plus the features that drove "
+                "that score. This is the most reliable evidence available — "
+                "prefer it over reasoning from raw counts, but state the "
+                "probability alongside your own reading of the other tools."
             ),
         ),
     ]

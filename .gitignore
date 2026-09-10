@@ -74,3 +74,9 @@ context.txt
 frontend_prompt.md
 # Local embedded dev database (pgserver)
 .pgdata/
+
+# Generated simulation datasets (reproducible from --seed)
+data/
+
+# Trained model artefacts (regenerate with: python -m ml.train)
+models/
