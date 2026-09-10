@@ -2,9 +2,15 @@
 Entity extractor for stream processing.
 
 Parses raw events from Bluesky, Mastodon, HN, and GitHub into typed
-graph nodes and directed edges. Rule-based extraction handles all
-structured fields; spaCy en_core_web_sm (CPU, ~12 MB) handles NER
-on free text.
+graph nodes and directed edges.
+
+Bluesky replies and reposts become `reshare` edges (parent -> child), which
+is the only propagation structure in the graph: everything else records
+authorship or topic membership. Cascade traversal and feature extraction walk
+`reshare` edges exclusively, so without them every cascade is a single node.
+
+Rule-based extraction handles all structured fields; spaCy en_core_web_sm
+(CPU, ~12 MB) handles NER on free text.
 
 The model is loaded once at first call and reused — no GPU required.
 """
@@ -53,7 +59,7 @@ class Node:
 class Edge:
     source_id: str
     target_id: str
-    edge_type: str   # authored | posted_to | watched | forked | pushed | created | mentions
+    edge_type: str   # authored | reshare | posted_to | watched | forked | pushed | created | mentions
     platform: str
     timestamp: str | None = None
     weight: float = 1.0
@@ -104,13 +110,42 @@ def _extract_bluesky(record: dict) -> EntitySet:
 
     content_id = f"{BLUESKY_CONTENT_PREFIX}{record['id']}"
     text = record.get("text", "")
+    is_repost = record.get("type") == "repost"
     es.nodes.append(Node(
         id=content_id,
         type="content",
         platform="bluesky",
-        label=text[:120],
-        metadata={"created_utc": record.get("created_utc"), "langs": record.get("langs", [])},
+        label=(text[:120] or "(repost)"),
+        metadata={
+            "created_utc": record.get("created_utc"),
+            "langs": record.get("langs", []),
+            "is_repost": is_repost,
+        },
     ))
+
+    # Replies and reposts are the propagation signal: they name the post being
+    # spread from. The edge runs parent -> child so a cascade can be walked
+    # forwards from its seed, which is the direction every traversal expects.
+    parent_id = record.get("parent_id")
+    if parent_id:
+        parent_content_id = f"{BLUESKY_CONTENT_PREFIX}{parent_id}"
+        # The parent may not have been ingested — the stream is a live sample,
+        # not a complete archive. Emit the node so the edge is never orphaned;
+        # upsert_node fills in its real label if the parent does arrive.
+        es.nodes.append(Node(
+            id=parent_content_id,
+            type="content",
+            platform="bluesky",
+            label="",
+            metadata={"placeholder": True},
+        ))
+        es.edges.append(Edge(
+            source_id=parent_content_id,
+            target_id=content_id,
+            edge_type="reshare",
+            platform="bluesky",
+            timestamp=ts,
+        ))
 
     author = record.get("author")
     if author:

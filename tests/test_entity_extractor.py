@@ -82,3 +82,62 @@ def test_named_entities_produce_mention_edges():
     )
     assert any(n.type == "named_entity" for n in es.nodes)
     assert any(e.edge_type == "mentions" for e in es.edges)
+
+
+def test_bluesky_reply_creates_a_reshare_edge():
+    """
+    Replies are propagation. Without a reshare edge the graph records who posted
+    and what was mentioned, but nothing about how anything spread.
+    """
+    es = extract_entity_set(
+        {
+            "platform": "bluesky", "id": "me_r1", "type": "post", "author": "me",
+            "text": "replying", "parent_id": "you_p9",
+            "ingested_at": "2026-01-01T00:00:00Z", "langs": [],
+        }
+    )
+    reshares = [e for e in es.edges if e.edge_type == "reshare"]
+    assert len(reshares) == 1
+    assert reshares[0].source_id == f"{BLUESKY_CONTENT_PREFIX}you_p9"
+    assert reshares[0].target_id == f"{BLUESKY_CONTENT_PREFIX}me_r1"
+
+
+def test_bluesky_repost_creates_a_reshare_edge_without_text():
+    es = extract_entity_set(
+        {
+            "platform": "bluesky", "id": "me_r2", "type": "repost", "author": "me",
+            "text": "", "parent_id": "you_p9",
+            "ingested_at": "2026-01-01T00:00:00Z", "langs": [],
+        }
+    )
+    assert any(e.edge_type == "reshare" for e in es.edges)
+    assert any(e.edge_type == "authored" for e in es.edges)
+
+
+def test_unreferenced_parent_gets_a_placeholder_node():
+    """
+    The firehose is a sample, so a reply's parent may never be captured. The
+    placeholder keeps the edge from dangling; upsert_node refuses to let its
+    empty label overwrite the real post if it arrives later.
+    """
+    es = extract_entity_set(
+        {
+            "platform": "bluesky", "id": "me_r1", "type": "post", "author": "me",
+            "text": "hi", "parent_id": "you_p9",
+            "ingested_at": "2026-01-01T00:00:00Z", "langs": [],
+        }
+    )
+    parent = next(n for n in es.nodes if n.id == f"{BLUESKY_CONTENT_PREFIX}you_p9")
+    assert parent.label == ""
+    assert parent.metadata.get("placeholder") is True
+
+
+def test_standalone_post_has_no_reshare_edge():
+    es = extract_entity_set(
+        {
+            "platform": "bluesky", "id": "me_r3", "type": "post", "author": "me",
+            "text": "original thought", "parent_id": None,
+            "ingested_at": "2026-01-01T00:00:00Z", "langs": [],
+        }
+    )
+    assert not any(e.edge_type == "reshare" for e in es.edges)

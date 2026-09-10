@@ -24,13 +24,29 @@ from typing import Any
 # ── writes ────────────────────────────────────────────────────────────────────
 
 async def upsert_node(conn, node_id: str, node_type: str, platform: str, label: str, metadata: dict) -> None:
+    """
+    Insert a node, or refresh the one already stored.
+
+    A reply or repost names a parent post that may not have been ingested — the
+    firehose is a live sample, not an archive — so the extractor emits a
+    placeholder for it to keep the edge from dangling. A placeholder must never
+    overwrite a real node: it carries an empty label and would blank the parent's
+    text if it happened to arrive second. Empty labels and placeholder metadata
+    are therefore ignored on conflict, while last_seen still advances.
+    """
     await conn.execute(
         """
         INSERT INTO graph_nodes (id, type, platform, label, metadata)
         VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (id, platform) DO UPDATE
-            SET label     = EXCLUDED.label,
-                metadata  = EXCLUDED.metadata,
+            SET label     = CASE
+                                WHEN EXCLUDED.label = '' THEN graph_nodes.label
+                                ELSE EXCLUDED.label
+                            END,
+                metadata  = CASE
+                                WHEN EXCLUDED.metadata ? 'placeholder' THEN graph_nodes.metadata
+                                ELSE EXCLUDED.metadata
+                            END,
                 last_seen = now()
         """,
         node_id, node_type, platform, label, json.dumps(metadata),

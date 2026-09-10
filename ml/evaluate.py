@@ -61,6 +61,8 @@ THRESHOLD_GRID = np.round(np.arange(0.50, 0.96, 0.05), 2)
 N_RELIABILITY_BINS = 8
 
 DEFAULT_LLM_SAMPLE = 24
+# Pause between investigations, to stay inside hosted rate limits.
+DEFAULT_LLM_DELAY = 1.5
 
 log = logging.getLogger(__name__)
 
@@ -193,6 +195,7 @@ async def run_llm_arm(
     sample: pd.DataFrame,
     include_model_tool: bool,
     label: str,
+    delay_seconds: float = DEFAULT_LLM_DELAY,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """
     Run the agent over the sampled cascades.
@@ -218,9 +221,16 @@ async def run_llm_arm(
                         platform=platforms.get(row.root_node_id, "unknown"),
                         include_model_tool=include_model_tool,
                     )
-                except Exception:
+                except Exception as exc:
                     failed += 1
-                    log.warning("[%s] %d/%d produced no verdict", label, i, len(sample))
+                    # Say *why*. "produced no verdict" alone cannot distinguish a
+                    # model that answered unparseably from a provider returning
+                    # 429 for the whole run, and those need opposite responses.
+                    log.warning(
+                        "[%s] %d/%d produced no verdict — %s: %s",
+                        label, i, len(sample), type(exc).__name__,
+                        str(exc).replace("\n", " ")[:200],
+                    )
                     continue
                 probabilities.append(
                     _verdict_to_probability(verdict["classification"], verdict["confidence"])
@@ -231,6 +241,11 @@ async def run_llm_arm(
                     label, i, len(sample), row.root_node_id[-12:],
                     verdict["classification"], verdict["confidence"], row.label,
                 )
+                # A hosted provider rate-limits per minute and one investigation
+                # is several calls, so pace them rather than burning the sample
+                # on 429s.
+                if delay_seconds:
+                    await asyncio.sleep(delay_seconds)
     finally:
         await conn.close()
     return np.array(y_true), np.array(probabilities), failed
@@ -347,7 +362,11 @@ Reproduce with `python -m ml.evaluate`.
 
 
 async def main_async(
-    labels_path: pathlib.Path, llm_sample: int, skip_llm: bool, seed: int
+    labels_path: pathlib.Path,
+    llm_sample: int,
+    skip_llm: bool,
+    seed: int,
+    llm_delay: float = DEFAULT_LLM_DELAY,
 ) -> None:
     model = load_model()
     if model is None:
@@ -367,7 +386,7 @@ async def main_async(
         sample = _stratified_sample(holdout, llm_sample, seed)
         log.info("running LLM arms over %d sampled cascades (this is slow)", len(sample))
         for name, include_model in (("llm", False), ("hybrid", True)):
-            y, p, failed = await run_llm_arm(sample, include_model, name)
+            y, p, failed = await run_llm_arm(sample, include_model, name, llm_delay)
             failures[name] = failed
             if len(y):
                 results[name] = arm_metrics(y, p)
@@ -408,11 +427,19 @@ def main() -> None:
     parser.add_argument(
         "--skip-llm", action="store_true", help="classifier arm only (fast)"
     )
+    parser.add_argument(
+        "--llm-delay",
+        type=float,
+        default=DEFAULT_LLM_DELAY,
+        help="seconds between investigations, to stay inside hosted rate limits",
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     configure_logging()
-    asyncio.run(main_async(args.labels, args.llm_sample, args.skip_llm, args.seed))
+    asyncio.run(
+        main_async(args.labels, args.llm_sample, args.skip_llm, args.seed, args.llm_delay)
+    )
 
 
 if __name__ == "__main__":
