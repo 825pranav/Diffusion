@@ -6,6 +6,8 @@ Checks:
   2. DB is reachable and schema tables exist
   3. Inserts a synthetic anomaly event and waits for the agent to produce a case file
   4. Validates the case file schema (required fields, confidence in [0,1])
+  5. Confirms the background indexer populated trend_embeddings and that
+     similarity search returns results
 
 Usage:
     python scripts/validate_e2e.py [--timeout 120] [--api-url http://localhost:8000]
@@ -19,16 +21,21 @@ import argparse
 import asyncio
 import json
 import logging
+import pathlib
 import random
 import string
 import sys
 import time
-from datetime import datetime, timezone
 
 import aiohttp
 import asyncpg
 
-from config import DB_URL, configure_logging
+# Running this file by path puts scripts/ on sys.path, not the repo root, so the
+# project packages would not import. Prepend the root before any local import.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+from config import DB_URL, configure_logging  # noqa: E402
+from graph.embeddings import search_similar  # noqa: E402
 
 DEFAULT_API_URL = "http://localhost:8000"
 
@@ -77,11 +84,13 @@ async def inject_anomaly(conn: asyncpg.Connection) -> tuple[int, str]:
     node_id = _rand_node_id()
     platform = random.choice(["bluesky", "mastodon", "hn", "github"])
 
-    # insert a node so propagation queries have something to find
+    # Insert a node so propagation queries have something to find. 'named_entity'
+    # is a trend type, so the background indexer will embed it — which is what
+    # the similarity-search check below asserts.
     await conn.execute(
         """
         INSERT INTO graph_nodes (id, type, platform, label, metadata)
-        VALUES ($1, 'post', $2, $3, '{"synthetic": true, "e2e": true}'::jsonb)
+        VALUES ($1, 'named_entity', $2, $3, '{"synthetic": true, "e2e": true}'::jsonb)
         ON CONFLICT (id, platform) DO NOTHING
         """,
         node_id, platform, f"E2E test node {node_id[-8:]}",
@@ -139,6 +148,41 @@ def validate_case_file(case: dict) -> list[str]:
     return errors
 
 
+async def wait_for_embeddings(conn: asyncpg.Connection, timeout_s: float) -> int:
+    """
+    Wait for the background indexer to populate trend_embeddings.
+
+    Nothing used to call embed_unindexed_nodes, so the table stayed empty and the
+    agent's search_similar_trends tool returned [] on every investigation without
+    surfacing an error. Asserting it here keeps that regression from returning.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        count = await conn.fetchval("SELECT COUNT(*) FROM trend_embeddings")
+        if count:
+            return int(count)
+        log.info("waiting for embedding indexer… (%.0fs remaining)", deadline - time.monotonic())
+        await asyncio.sleep(5)
+    return 0
+
+
+async def check_similarity_search(conn: asyncpg.Connection) -> bool:
+    async with aiohttp.ClientSession() as session:
+        try:
+            hits = await search_similar(conn, "test node", session, limit=5)
+        except Exception as exc:
+            log.error("✗ similarity search failed: %s", exc)
+            return False
+    if not hits:
+        log.error("✗ similarity search returned no results")
+        return False
+    log.info(
+        "✓ similarity search — %d results (top similarity %.3f)",
+        len(hits), hits[0]["similarity"],
+    )
+    return True
+
+
 async def run(api_url: str, timeout_s: float) -> bool:
     all_ok = True
 
@@ -178,8 +222,27 @@ async def run(api_url: str, timeout_s: float) -> bool:
                     case["needs_review"],
                 )
 
-        # clean up e2e test data
+        embedded = await wait_for_embeddings(conn, timeout_s=90)
+        if not embedded:
+            log.error("✗ trend_embeddings is empty — background indexer not running")
+            all_ok = False
+        else:
+            log.info("✓ embeddings — %d nodes indexed", embedded)
+            if not await check_similarity_search(conn):
+                all_ok = False
+
+        # Clean up e2e test data. case_files references anomaly_events, so it has
+        # to go first — deleting the parent row first raises a FK violation.
+        await conn.execute(
+            """
+            DELETE FROM case_files
+            WHERE anomaly_event_id IN (
+                SELECT id FROM anomaly_events WHERE node_id LIKE 'e2e_test_%'
+            )
+            """
+        )
         await conn.execute("DELETE FROM anomaly_events WHERE node_id LIKE 'e2e_test_%'")
+        await conn.execute("DELETE FROM trend_embeddings WHERE node_id LIKE 'e2e_test_%'")
         await conn.execute("DELETE FROM graph_nodes WHERE id LIKE 'e2e_test_%'")
     finally:
         await conn.close()

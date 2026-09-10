@@ -55,7 +55,7 @@ async def handle(
         if node.type not in _VELOCITY_TYPES:
             continue
         vscore = scorer.record(node.id)
-        await detector.evaluate(vscore, platform=platform)
+        await detector.evaluate(conn, vscore, platform=platform)
 
 
 async def main() -> None:

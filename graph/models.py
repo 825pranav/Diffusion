@@ -96,6 +96,12 @@ CREATE_INDEXES = [
     # pgvector HNSW index — scoped queries filter on (model_name, model_version) first
     "CREATE INDEX IF NOT EXISTS idx_trend_embeddings_vec ON trend_embeddings USING hnsw (embedding vector_cosine_ops);",
     "CREATE INDEX IF NOT EXISTS idx_trend_embeddings_model ON trend_embeddings (model_name, model_version);",
+    # store_embedding relies on ON CONFLICT (node_id, platform, model_name,
+    # model_version); without a matching unique index Postgres rejects the
+    # statement outright ("no unique or exclusion constraint matching the ON
+    # CONFLICT specification"), so every embedding write fails.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_trend_embeddings_identity "
+    "ON trend_embeddings (node_id, platform, model_name, model_version);",
     # agent queries uninvestigated anomalies
     "CREATE INDEX IF NOT EXISTS idx_anomaly_events_uninvestigated ON anomaly_events (detected_at DESC) WHERE investigated = FALSE;",
     # case file review queue

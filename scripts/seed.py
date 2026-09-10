@@ -14,13 +14,18 @@ import argparse
 import asyncio
 import json
 import logging
+import pathlib
 import random
 import string
+import sys
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
-from config import DB_URL, configure_logging
+# Running this file by path puts scripts/ on sys.path, not the repo root.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+from config import DB_URL, configure_logging  # noqa: E402
 
 PLATFORMS = ["bluesky", "mastodon", "hn", "github"]
 EDGE_TYPES = ["repost", "comment", "reference", "share"]
@@ -52,7 +57,7 @@ async def seed(conn: asyncpg.Connection, n_nodes: int, n_edges: int, n_anomalies
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (id, platform) DO NOTHING
             """,
-            nid, "post", platform, label, json.dumps({"synthetic": True}),
+            nid, "content", platform, label, json.dumps({"synthetic": True}),
         )
         node_ids.append(nid)
 

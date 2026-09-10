@@ -15,13 +15,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import pathlib
 import statistics
+import sys
 import time
 from dataclasses import dataclass, field
 
 import aiohttp
 
-from config import configure_logging
+# Running this file by path puts scripts/ on sys.path, not the repo root.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+from config import configure_logging  # noqa: E402
 
 DEFAULT_API_URL = "http://localhost:8000"
 

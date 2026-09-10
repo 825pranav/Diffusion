@@ -15,6 +15,7 @@ from agent.agent import agent_listener
 from api.routes import router
 from api.sse import publish as sse_publish, router as sse_router
 from api.websocket import graph_delta_listener, router as ws_router
+from graph import embeddings
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 
@@ -33,10 +34,15 @@ async def lifespan(app: FastAPI):
     app.state.http = aiohttp.ClientSession()
     delta_task = asyncio.create_task(graph_delta_listener())
     agent_task = asyncio.create_task(agent_listener(emit_factory=_make_emit))
+    # Keeps trend_embeddings populated; without it the agent's similarity search
+    # has nothing to retrieve.
+    indexer_task = asyncio.create_task(
+        embeddings.indexer_loop(app.state.db, app.state.http)
+    )
     yield
-    agent_task.cancel()
-    delta_task.cancel()
-    await asyncio.gather(agent_task, delta_task, return_exceptions=True)
+    for task in (agent_task, delta_task, indexer_task):
+        task.cancel()
+    await asyncio.gather(agent_task, delta_task, indexer_task, return_exceptions=True)
     await app.state.http.close()
     await app.state.db.close()
 

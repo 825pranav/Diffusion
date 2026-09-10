@@ -1,13 +1,19 @@
 """
 LlamaIndex ReAct agent for anomaly investigation.
 
-Wakes via PostgreSQL LISTEN/NOTIFY on 'anomaly_detected'.
+Wakes via PostgreSQL LISTEN/NOTIFY on 'anomaly_detected', with a periodic
+backlog sweep behind it so anomalies raised while the agent was unavailable are
+still investigated rather than silently dropped.
+
 For each anomaly event the agent:
-  1. Runs a bounded ReAct loop with the three investigation tools
-  2. Applies the confidence gate (< 0.65 → needs_review, withheld from feed)
+  1. Runs a bounded ReAct loop with the investigation tools
+  2. Applies the confidence gate (< threshold → needs_review, withheld from feed)
   3. Scores the output with Ragas
   4. Writes a structured case file to PostgreSQL
   5. Marks the anomaly event as investigated
+
+An investigation that produces no valid output writes nothing and leaves the
+anomaly uninvestigated, so the sweep retries it.
 """
 
 from __future__ import annotations
@@ -32,11 +38,15 @@ from agent.tools import build_tools
 from agent.types import Emitter
 from graph import embeddings as emb
 from graph.models import ANOMALY_NOTIFY_CHANNEL
-from graph.queries import mark_anomaly_investigated
+from graph.queries import get_uninvestigated_anomalies, mark_anomaly_investigated
 
 MAX_AGENT_STEPS = int(os.getenv("AGENT_MAX_STEPS", "12"))
 OLLAMA_REQUEST_TIMEOUT = 120.0   # seconds before Ollama inference is abandoned
 GROQ_RATE_LIMIT_SLEEP = 5        # seconds to wait between investigations to avoid 429s
+
+# Backlog sweep — recovers anomalies that NOTIFY never delivered.
+SWEEP_INTERVAL_SECONDS = int(os.getenv("AGENT_SWEEP_INTERVAL", "60"))
+SWEEP_BATCH_SIZE = int(os.getenv("AGENT_SWEEP_BATCH", "50"))
 
 log = logging.getLogger(__name__)
 
@@ -147,8 +157,19 @@ async def investigate(
         response = await agent.aquery(query)
         result = _parse_agent_response(str(response))
     except Exception:
-        log.exception("agent failed to produce valid output for anomaly %s", anomaly_id)
-        result = {"classification": "uncertain", "confidence": 0.0, "signals": [], "reasoning_steps": []}
+        # Do not fabricate a case file.  Writing "uncertain / confidence 0.0" here
+        # would publish an unsupported verdict and — because the anomaly would be
+        # marked investigated — permanently hide the failure.  Leaving the row
+        # uninvestigated lets the backlog sweep retry it.
+        log.exception(
+            "agent produced no valid output for anomaly %s — "
+            "leaving uninvestigated for retry",
+            anomaly_id,
+        )
+        if emit:
+            await emit({"type": "failed", "reason": "agent produced no valid output"})
+            await emit(None)
+        return
 
     classification: str = result["classification"]
     confidence: float = result["confidence"]
@@ -213,7 +234,18 @@ async def investigate(
 
 async def agent_listener(emit_factory: Callable[[int], Emitter] | None = None) -> None:
     """
-    Background coroutine — LISTENs on 'anomaly_detected' and runs investigations.
+    Background coroutine — drives investigations from two sources.
+
+    NOTIFY is the fast path: the anomaly detector's INSERT fires a trigger and the
+    agent wakes immediately.  It is not durable, though — Postgres drops
+    notifications with no live listener, so any anomaly raised while this process
+    is down, restarting, or busy would be lost for good.
+
+    The backlog sweep makes delivery durable by polling for rows still marked
+    uninvestigated.  Together they give low latency when healthy and no permanent
+    loss when not.  Both feed one queue, de-duplicated by anomaly id so a sweep
+    cannot re-enqueue work that NOTIFY is already running.
+
     Can be embedded in the API lifespan or run standalone via main().
     emit_factory(anomaly_id) returns an emit callable for SSE streaming; pass None to disable.
     """
@@ -221,16 +253,47 @@ async def agent_listener(emit_factory: Callable[[int], Emitter] | None = None) -
     notify_conn = await asyncpg.connect(DB_URL)
     queue: asyncio.Queue[dict] = asyncio.Queue()
 
+    # Anomaly ids queued or in flight.  Guards against the sweep re-enqueueing an
+    # anomaly that NOTIFY already delivered but which is not yet marked investigated.
+    inflight: set[int] = set()
+
+    def _enqueue(event: dict) -> bool:
+        anomaly_id = event.get("id")
+        if anomaly_id is not None:
+            if anomaly_id in inflight:
+                return False
+            inflight.add(anomaly_id)
+        queue.put_nowait(event)
+        return True
+
     def _on_notify(_conn, _pid, _channel, payload: str) -> None:
         try:
-            event = json.loads(payload)
-            queue.put_nowait(event)
+            _enqueue(json.loads(payload))
         except json.JSONDecodeError:
             log.warning("non-JSON notify payload: %.200s", payload)
 
-    await notify_conn.add_listener(ANOMALY_NOTIFY_CHANNEL, _on_notify)
-    log.info("agent listening on channel '%s'", ANOMALY_NOTIFY_CHANNEL)
+    async def _sweep_loop() -> None:
+        """Re-drive anomalies that NOTIFY never delivered, forever."""
+        while True:
+            try:
+                async with pool.acquire() as conn:
+                    backlog = await get_uninvestigated_anomalies(conn, limit=SWEEP_BATCH_SIZE)
+                recovered = sum(1 for event in backlog if _enqueue(event))
+                if recovered:
+                    log.info("backlog sweep recovered %d uninvestigated anomalies", recovered)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("backlog sweep failed — retrying next tick")
+            await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
 
+    await notify_conn.add_listener(ANOMALY_NOTIFY_CHANNEL, _on_notify)
+    log.info(
+        "agent listening on channel '%s' (backlog sweep every %ds)",
+        ANOMALY_NOTIFY_CHANNEL, SWEEP_INTERVAL_SECONDS,
+    )
+
+    sweep_task = asyncio.create_task(_sweep_loop())
     try:
         async with aiohttp.ClientSession() as session:
             while True:
@@ -241,13 +304,20 @@ async def agent_listener(emit_factory: Callable[[int], Emitter] | None = None) -
                     if emit_factory and anomaly_id is not None
                     else None
                 )
-                async with pool.acquire() as conn:
-                    try:
+                try:
+                    async with pool.acquire() as conn:
                         await investigate(conn, session, event, emit=emit)
-                        await asyncio.sleep(GROQ_RATE_LIMIT_SLEEP)
-                    except Exception:
-                        log.exception("investigation failed for event %s", anomaly_id)
+                    await asyncio.sleep(GROQ_RATE_LIMIT_SLEEP)
+                except Exception:
+                    log.exception("investigation failed for event %s", anomaly_id)
+                finally:
+                    # Always release the id: a failed investigation leaves the row
+                    # uninvestigated, and the next sweep should be free to retry it.
+                    if anomaly_id is not None:
+                        inflight.discard(anomaly_id)
     finally:
+        sweep_task.cancel()
+        await asyncio.gather(sweep_task, return_exceptions=True)
         await notify_conn.remove_listener(ANOMALY_NOTIFY_CHANNEL, _on_notify)
         await notify_conn.close()
         await pool.close()

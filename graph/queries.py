@@ -11,6 +11,7 @@ Queries:
   get_node_degree        — in/out degree for a node
   get_cascade_size       — total nodes reachable from a root
   get_top_nodes_by_degree — highest-degree nodes in a time window
+  get_uninvestigated_anomalies — backlog for the agent's durability sweep
   mark_anomaly_investigated — flip investigated flag after agent run
 """
 
@@ -177,6 +178,31 @@ async def get_top_nodes_by_degree(
         LIMIT $3
         """,
         since_minutes, platform, limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_uninvestigated_anomalies(conn, limit: int = 50) -> list[dict[str, Any]]:
+    """
+    Anomalies that were never investigated, oldest first.
+
+    Backs the agent's backlog sweep.  Postgres NOTIFY is fire-and-forget: an
+    anomaly raised while the agent is down, restarting, or mid-failure is never
+    redelivered, so NOTIFY alone silently drops work.  Sweeping this query makes
+    delivery durable, with NOTIFY kept as the low-latency fast path.
+
+    Oldest first so a backlog drains in the order it accumulated.  Served by
+    idx_anomaly_events_uninvestigated.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT id, node_id, platform, z_score, velocity, detected_at
+        FROM anomaly_events
+        WHERE investigated = FALSE
+        ORDER BY detected_at ASC
+        LIMIT $1
+        """,
+        limit,
     )
     return [dict(r) for r in rows]
 
