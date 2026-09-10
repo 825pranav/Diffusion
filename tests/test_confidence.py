@@ -18,6 +18,8 @@ def test_default_matches_the_derived_gate():
     """
     Read off the reliability curve by ml/evaluate.py, not guessed.
 
-    If a retrain moves it, re-derive rather than editing this test.
+    It is a property of the fitted model and does move — it shifted 0.85 -> 0.80
+    across a retrain. If this fails, re-derive with `python -m ml.evaluate` and
+    update both, rather than editing the number to match.
     """
-    assert CONFIDENCE_THRESHOLD == 0.85
+    assert CONFIDENCE_THRESHOLD == 0.80

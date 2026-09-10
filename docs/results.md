@@ -5,35 +5,34 @@ script — do not edit by hand.
 
 ## Virality classifier — cross-validation
 
-
 LightGBM, positive class = `coordinated`. 5-fold stratified
 cross-validation on the training split only (1600 cascades); 400
 cascades are held out for `ml/evaluate.py` and never seen here.
 
 | metric | mean | std | min | max |
 |---|---|---|---|---|
-| precision | 0.875 | 0.017 | 0.848 | 0.892 |
-| recall | 0.833 | 0.032 | 0.784 | 0.870 |
-| f1 | 0.854 | 0.023 | 0.825 | 0.881 |
-| roc_auc | 0.921 | 0.026 | 0.891 | 0.954 |
-| pr_auc | 0.936 | 0.019 | 0.911 | 0.958 |
+| precision | 0.870 | 0.029 | 0.826 | 0.904 |
+| recall | 0.829 | 0.044 | 0.759 | 0.877 |
+| f1 | 0.849 | 0.034 | 0.807 | 0.890 |
+| roc_auc | 0.922 | 0.028 | 0.890 | 0.956 |
+| pr_auc | 0.937 | 0.020 | 0.910 | 0.960 |
 
 ### Feature importance (gain)
 
 | feature | gain | share |
 |---|---|---|
-| prior_author_mean | 2,935 | 14.6% |
-| time_to_half_s | 2,776 | 13.8% |
-| cross_platform_edge_frac | 2,137 | 10.6% |
-| mean_children | 1,410 | 7.0% |
-| leaf_frac | 1,390 | 6.9% |
-| delay_median_s | 1,240 | 6.2% |
-| prior_author_max | 1,204 | 6.0% |
-| first_hop_lag_s | 1,067 | 5.3% |
-| root_fanout_share | 812 | 4.0% |
-| delay_cv | 700 | 3.5% |
-| duration_s | 559 | 2.8% |
-| delay_mean_s | 553 | 2.7% |
+| prior_author_mean | 2,911 | 14.5% |
+| time_to_half_s | 2,775 | 13.8% |
+| cross_platform_edge_frac | 2,158 | 10.7% |
+| leaf_frac | 1,398 | 6.9% |
+| mean_children | 1,377 | 6.8% |
+| delay_median_s | 1,257 | 6.2% |
+| prior_author_max | 1,226 | 6.1% |
+| first_hop_lag_s | 1,031 | 5.1% |
+| root_fanout_share | 737 | 3.7% |
+| delay_cv | 707 | 3.5% |
+| duration_s | 613 | 3.0% |
+| delay_mean_s | 554 | 2.8% |
 
 Reproduce with `python -m ml.train`.
 
@@ -61,7 +60,6 @@ Reproduce with `python -m ml.eval_anomaly`.
 
 ## Filtered vector search — recall
 
-
 A 10,000-vector corpus in which the `(model_name, model_version)` filter keeps
 only the stated share of rows. Recall@5 is measured against a sequential scan,
 exact by construction, over 100 queries per row, with `hnsw.ef_search`
@@ -70,9 +68,9 @@ not about search effort.
 
 | filter keeps | shared recall@5 | shared rows | partial recall@5 | partial rows |
 |---|---|---|---|---|
-| 5% | 0.910 | 4.71 / 5 | 0.980 | 5.00 / 5 |
-| 10% | 1.000 | 5.00 / 5 | 0.872 | 5.00 / 5 |
-| 20% | 0.184 | 4.37 / 5 | 0.724 | 5.00 / 5 |
+| 5% | 0.486 | 2.46 / 5 | 0.980 | 5.00 / 5 |
+| 10% | 0.338 | 4.23 / 5 | 0.870 | 5.00 / 5 |
+| 20% | 0.342 | 4.89 / 5 | 0.674 | 5.00 / 5 |
 
 The table-wide index never returns a full result set: it walks the graph unaware
 of the filter, and neighbours from the other model version are discarded *after*
@@ -98,27 +96,57 @@ Reproduce with `python -m ml.eval_retrieval`.
 
 ## Classifier vs LLM agent — held-out comparison
 
-
 All arms scored on the same temporally held-out split (400 cascades;
-the LLM arms are sampled from it, `n` below). Positive class = `coordinated`.
+the LLM arms are sampled from it, `n` below).
 
-| arm | n | precision | recall | F1 | ROC-AUC | Brier |
-|---|---|---|---|---|---|---|
-| `classifier` | 400 | 0.785 | 0.937 | 0.854 | 0.938 | 0.122 |
+| arm | n | accuracy | macro F1 | ROC-AUC | Brier |
+|---|---|---|---|---|---|
+| `classifier` | 400 | 0.838 | 0.837 | 0.940 | 0.119 |
+| `llm` | 14 | 0.571 | 0.571 | 0.602 | 0.264 |
+| `hybrid` | 15 | 0.800 | 0.796 | 0.833 | 0.219 |
+
+### Per class
+
+Reported both ways because the arms fail differently — an arm can look strong on
+`coordinated` while misclassifying most organic cascades, which a single
+positive-class F1 hides.
+
+| arm | class | precision | recall | F1 |
+|---|---|---|---|---|
+| `classifier` | coordinated | 0.776 | 0.927 | 0.845 |
+| `classifier` | organic | 0.919 | 0.756 | 0.829 |
+| `llm` | coordinated | 0.571 | 0.571 | 0.571 |
+| `llm` | organic | 0.571 | 0.571 | 0.571 |
+| `hybrid` | coordinated | 0.875 | 0.778 | 0.824 |
+| `hybrid` | organic | 0.714 | 0.833 | 0.769 |
 
 ![reliability diagram](reliability.png)
 
-Investigations that returned no parseable verdict: none. They are
+Investigations that returned no parseable verdict: `llm` 6, `hybrid` 5. They are
 excluded rather than counted as wrong — each arm is measured on the answers it
 actually gives, and the count is reported so the omission stays visible.
+
+### By cascade subtype
+
+| subtype | n | accuracy |
+|---|---|---|
+| `plain` | 340 | 0.888 |
+| `stealth_coordinated` | 28 | 0.607 |
+| `viral_organic` | 32 | 0.500 |
+
+The simulator generates a fraction of each class as a confusable subtype:
+`viral_organic` cascades that burst like a campaign, and `stealth_coordinated`
+ones that pace themselves and rotate accounts. They should be measurably harder
+than the plain cases, and are — which is the evidence that the overlap built into
+the generator is doing real work rather than decorating the dataset.
 
 ### Human-review gate
 
 `CONFIDENCE_THRESHOLD` was a guessed 0.65. Read off the classifier's reliability
 curve, the lowest gate whose retained predictions reach
-90% accuracy is **0.85**, which holds
-91.0% accuracy while auto-publishing
-74.8% of cases. The remainder goes to a human.
+90% accuracy is **0.80**, which holds
+90.2% accuracy while auto-publishing
+76.8% of cases. The remainder goes to a human.
 
 Lowest rather than safest: every extra point of threshold buys accuracy by
 sending more cases to review, so the cheapest gate that clears the bar is the
