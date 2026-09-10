@@ -11,28 +11,28 @@ cascades are held out for `ml/evaluate.py` and never seen here.
 
 | metric | mean | std | min | max |
 |---|---|---|---|---|
-| precision | 0.870 | 0.029 | 0.826 | 0.904 |
-| recall | 0.829 | 0.044 | 0.759 | 0.877 |
-| f1 | 0.849 | 0.034 | 0.807 | 0.890 |
-| roc_auc | 0.922 | 0.028 | 0.890 | 0.956 |
-| pr_auc | 0.937 | 0.020 | 0.910 | 0.960 |
+| precision | 0.887 | 0.027 | 0.851 | 0.919 |
+| recall | 0.836 | 0.060 | 0.753 | 0.914 |
+| f1 | 0.860 | 0.039 | 0.813 | 0.911 |
+| roc_auc | 0.929 | 0.027 | 0.892 | 0.964 |
+| pr_auc | 0.942 | 0.020 | 0.913 | 0.967 |
 
 ### Feature importance (gain)
 
 | feature | gain | share |
 |---|---|---|
-| prior_author_mean | 2,911 | 14.5% |
-| time_to_half_s | 2,775 | 13.8% |
-| cross_platform_edge_frac | 2,158 | 10.7% |
-| leaf_frac | 1,398 | 6.9% |
-| mean_children | 1,377 | 6.8% |
-| delay_median_s | 1,257 | 6.2% |
-| prior_author_max | 1,226 | 6.1% |
-| first_hop_lag_s | 1,031 | 5.1% |
-| root_fanout_share | 737 | 3.7% |
-| delay_cv | 707 | 3.5% |
-| duration_s | 613 | 3.0% |
-| delay_mean_s | 554 | 2.8% |
+| prior_author_mean | 6,070 | 30.4% |
+| cross_platform_edge_frac | 1,594 | 8.0% |
+| time_to_half_s | 1,410 | 7.1% |
+| mean_children | 1,207 | 6.0% |
+| leaf_frac | 1,118 | 5.6% |
+| first_hop_lag_s | 1,044 | 5.2% |
+| root_fanout_share | 977 | 4.9% |
+| delay_median_s | 928 | 4.6% |
+| prior_author_frac | 875 | 4.4% |
+| delay_cv | 751 | 3.8% |
+| delay_mean_s | 556 | 2.8% |
+| peak_rate_per_min | 516 | 2.6% |
 
 Reproduce with `python -m ml.train`.
 
@@ -101,9 +101,7 @@ the LLM arms are sampled from it, `n` below).
 
 | arm | n | accuracy | macro F1 | ROC-AUC | Brier |
 |---|---|---|---|---|---|
-| `classifier` | 400 | 0.838 | 0.837 | 0.940 | 0.119 |
-| `llm` | 14 | 0.571 | 0.571 | 0.602 | 0.264 |
-| `hybrid` | 15 | 0.800 | 0.796 | 0.833 | 0.219 |
+| `classifier` | 400 | 0.890 | 0.889 | 0.938 | 0.086 |
 
 ### Per class
 
@@ -113,16 +111,12 @@ positive-class F1 hides.
 
 | arm | class | precision | recall | F1 |
 |---|---|---|---|---|
-| `classifier` | coordinated | 0.776 | 0.927 | 0.845 |
-| `classifier` | organic | 0.919 | 0.756 | 0.829 |
-| `llm` | coordinated | 0.571 | 0.571 | 0.571 |
-| `llm` | organic | 0.571 | 0.571 | 0.571 |
-| `hybrid` | coordinated | 0.875 | 0.778 | 0.824 |
-| `hybrid` | organic | 0.714 | 0.833 | 0.769 |
+| `classifier` | coordinated | 0.906 | 0.859 | 0.882 |
+| `classifier` | organic | 0.877 | 0.919 | 0.897 |
 
 ![reliability diagram](reliability.png)
 
-Investigations that returned no parseable verdict: `llm` 6, `hybrid` 5. They are
+Investigations that returned no parseable verdict: none. They are
 excluded rather than counted as wrong — each arm is measured on the answers it
 actually gives, and the count is reported so the omission stays visible.
 
@@ -130,9 +124,9 @@ actually gives, and the count is reported so the omission stays visible.
 
 | subtype | n | accuracy |
 |---|---|---|
-| `plain` | 340 | 0.888 |
-| `stealth_coordinated` | 28 | 0.607 |
-| `viral_organic` | 32 | 0.500 |
+| `plain` | 340 | 0.941 |
+| `stealth_coordinated` | 28 | 0.393 |
+| `viral_organic` | 32 | 0.781 |
 
 The simulator generates a fraction of each class as a confusable subtype:
 `viral_organic` cascades that burst like a campaign, and `stealth_coordinated`
@@ -144,9 +138,9 @@ the generator is doing real work rather than decorating the dataset.
 
 `CONFIDENCE_THRESHOLD` was a guessed 0.65. Read off the classifier's reliability
 curve, the lowest gate whose retained predictions reach
-90% accuracy is **0.80**, which holds
-90.2% accuracy while auto-publishing
-76.8% of cases. The remainder goes to a human.
+90% accuracy is **0.55**, which holds
+90.7% accuracy while auto-publishing
+96.8% of cases. The remainder goes to a human.
 
 Lowest rather than safest: every extra point of threshold buys accuracy by
 sending more cases to review, so the cheapest gate that clears the bar is the
@@ -154,3 +148,75 @@ right one. Re-derive after any retrain — the number is a property of the fitte
 model, not a constant.
 
 Reproduce with `python -m ml.evaluate`.
+
+## Learned deferral — knowing when not to answer
+
+**This is a negative result, kept because it is one.** Learned deferral was
+built to replace confidence gating and does not beat it.
+
+The motivation was real. Confidence gating assumes a prediction the classifier
+is sure about is a prediction likely to be right, and on an earlier build that
+failed badly — published `viral_organic` cascades scored 0.474, worse than
+chance. That turned out to be a *feature bug*, not a gating problem: author
+reuse was counted cumulatively from the start of the dataset, so it grew without
+bound and meant something different either side of a temporal split. Windowing
+it fixed the gate as a side effect, and `viral_organic` went from 0.500 to 0.781
+with no change to the gate at all.
+
+Deferral was implemented anyway, to test whether difficulty is learnable. A
+second LightGBM predicts *whether the classifier will be correct*, from the
+cascade's own shape plus the verdict the classifier gave it, with labels taken
+from out-of-fold predictions — scoring the classifier on rows it trained on
+would show it correct almost everywhere and teach the deferral model that
+nothing is hard.
+
+It matches confidence gating and does not beat it (0.958 against
+0.957 at the same coverage). The subtype table below says
+why: both gates publish a quarter of `stealth_coordinated` and get *every one*
+wrong. Those cascades are generated to look organic — paced timing, rotated
+accounts — so they are close to indistinguishable in the feature space both
+models read. A deferral model looking at the same features cannot flag what the
+classifier cannot separate; the difficulty is irreducible here, not something a
+better gate recovers.
+
+The conclusion that follows is about features, not gating: catching careful
+campaigns needs signals these features do not carry — account age, or
+coordination structure across cascades rather than within one.
+
+### Gate comparison, at matched coverage
+
+Both gates publish the same share of cases, so the only difference is *which*
+cases each one keeps.
+
+| target accuracy | deferral threshold | deferral accuracy | coverage | confidence accuracy at same coverage |
+|---|---|---|---|---|
+| 0.900 | 0.31 | 0.901 | 98.0% | 0.900 |
+| 0.925 | 0.82 | 0.928 | 83.2% | 0.928 |
+| 0.950 | 0.98 | 0.958 | 53.0% | 0.957 |
+| 0.970 | 0.98 | 0.958 | 53.0% | 0.957 |
+
+### Where each gate publishes, by subtype
+
+`published` is the share auto-published; `accuracy` is measured on those only.
+The confusable subtypes are where the confidence gate broke.
+
+| subtype | gate | n | published | accuracy once published |
+|---|---|---|---|---|
+| `plain` | confidence | 340 | 0.57 | 0.990 |
+| `plain` | deferral | 340 | 0.58 | 0.990 |
+| `stealth_coordinated` | confidence | 28 | 0.25 | 0.000 |
+| `stealth_coordinated` | deferral | 28 | 0.25 | 0.000 |
+| `viral_organic` | confidence | 32 | 0.22 | 1.000 |
+| `viral_organic` | deferral | 32 | 0.25 | 1.000 |
+
+### What ships
+
+Confidence gating stays in `agent/confidence.py`. Deferral matches it and costs a
+second model plus a second artefact to keep in sync, so it is not wired into the
+runtime — added complexity has to buy something measurable. The module and this
+table remain as the record of what was tried.
+
+Out-of-fold classifier accuracy is 0.863, so both gates are choosing
+between genuinely uncertain outcomes rather than reading an easy signal.
+
+Reproduce with `python -m ml.deferral`.

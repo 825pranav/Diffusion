@@ -177,3 +177,42 @@ def test_root_platform_comes_from_its_authored_edge():
     # Exactly one of the two edges is a genuine hop.
     assert row["cross_platform_edge_frac"] == pytest.approx(0.5)
     assert row["first_hop_lag_s"] == pytest.approx(60.0)
+
+
+def test_author_reuse_uses_a_trailing_window():
+    """
+    Reuse must not accumulate forever.
+
+    A running total since the dataset began grows without bound, so under a
+    temporal split the model learns thresholds on small early counts and is
+    tested on large late ones. Here the two cascades sit a day apart, well past
+    the window, so the later one sees no history.
+    """
+    early = _tree([("r1", "x1", 60, 1)], root="r1")
+    late = _tree([("r2", "y1", 86_400, 1)], root="r2")
+    tree = pd.concat([early, late], ignore_index=True)
+    authors = pd.concat(
+        [
+            _authors([("r1", "shared", 0), ("x1", "shared", 60)], root="r1"),
+            _authors([("r2", "shared", 86_400), ("y1", "shared", 86_460)], root="r2"),
+        ],
+        ignore_index=True,
+    )
+    features = compute_features(tree, authors, order=["r1", "r2"]).set_index("root_node_id")
+    assert features.loc["r2", "prior_author_frac"] == 0.0
+
+
+def test_within_cascade_counts_are_not_confused_with_history():
+    """
+    A cascade's own repeated authors are not prior reuse.
+
+    The two were briefly the same variable, which made every first-ever cascade
+    look like it had a full history behind it.
+    """
+    tree = _tree([("r", "c1", 60, 1), ("r", "c2", 120, 1)])
+    authors = _authors([("r", "solo", 0), ("c1", "solo", 60), ("c2", "solo", 120)])
+    row = compute_features(tree, authors, order=["r"]).iloc[0]
+    assert row["prior_author_frac"] == 0.0
+    assert row["prior_author_mean"] == 0.0
+    # ...while the within-cascade concentration is still reported.
+    assert row["max_author_share"] == 1.0

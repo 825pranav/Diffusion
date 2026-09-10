@@ -23,7 +23,7 @@ dataset would leak information from the future and inflate the score.
 from __future__ import annotations
 
 import logging
-from collections import Counter
+from collections import Counter, deque
 
 import numpy as np
 import pandas as pd
@@ -36,6 +36,11 @@ MAX_TREE_DEPTH = 40
 
 # Window used by the peak-rate feature.
 PEAK_WINDOW_SECONDS = 60.0
+
+# Trailing window for author-reuse features. Cumulative counts grow without
+# bound and stop meaning the same thing across a temporal split; a window keeps
+# them stationary and matches what production could actually compute.
+AUTHOR_WINDOW_SECONDS = 6 * 3600.0
 
 FEATURE_COLUMNS = [
     # structure
@@ -264,20 +269,47 @@ def _structure_and_timing(
     }
 
 
-def _author_features(authors: pd.DataFrame, order: list[str]) -> dict[str, dict[str, float]]:
+def _author_features(
+    authors: pd.DataFrame,
+    order: list[str],
+    start_times: dict[str, float] | None = None,
+) -> dict[str, dict[str, float]]:
     """
-    Author-reuse features, computed in cascade start order.
+    Author-reuse features over a trailing time window, in cascade start order.
 
     Walking the cascades chronologically and only counting authors already seen
     keeps the feature causal.  Counting over the entire dataset would let a
     cascade "know" about campaigns that ran after it — the classic form of
     leakage in this kind of feature, and one that would quietly inflate F1.
+
+    The count is windowed rather than cumulative, which matters as much as the
+    causality.  A running total since the dataset began grows without bound, so
+    with a temporal split the model learns thresholds on early, small counts and
+    is then tested on late, large ones: measured here, mean reuse nearly trebled
+    between train and holdout (1.7 sd) and "fraction of authors seen before"
+    saturated at 1.000, carrying no information at all.  A trailing window is
+    stationary, and it is also the only version computable in production, where
+    history cannot be accumulated forever.
     """
-    seen: Counter[str] = Counter()
+    window = AUTHOR_WINDOW_SECONDS
+    # `recent` is reuse within the trailing window; `counts` below is per-cascade
+    # author frequency. Two different things — do not merge the names.
+    recent: Counter[str] = Counter()
+    history: deque[tuple[float, list[str]]] = deque()
     out: dict[str, dict[str, float]] = {}
     grouped = {root: frame for root, frame in authors.groupby("root_id", sort=False)}
 
     for root_id in order:
+        now = (start_times or {}).get(root_id)
+        if now is not None:
+            # Drop cascades that have aged out of the window.
+            while history and history[0][0] < now - window:
+                _, expired = history.popleft()
+                for author in expired:
+                    recent[author] -= 1
+                    if recent[author] <= 0:
+                        del recent[author]
+
         frame = grouped.get(root_id)
         if frame is None or frame.empty:
             out[root_id] = {
@@ -292,7 +324,7 @@ def _author_features(authors: pd.DataFrame, order: list[str]) -> dict[str, dict[
         author_ids = frame["author_id"].tolist()
         unique_authors = set(author_ids)
         counts = frame["author_id"].value_counts()
-        prior = np.array([seen[a] for a in unique_authors], dtype=float)
+        prior = np.array([recent[a] for a in unique_authors], dtype=float)
 
         out[root_id] = {
             "unique_author_ratio": len(unique_authors) / len(author_ids),
@@ -302,7 +334,9 @@ def _author_features(authors: pd.DataFrame, order: list[str]) -> dict[str, dict[
             "prior_author_frac": float((prior > 0).mean()),
         }
         for author in unique_authors:
-            seen[author] += 1
+            recent[author] += 1
+        if now is not None:
+            history.append((now, list(unique_authors)))
 
     return out
 
@@ -327,7 +361,11 @@ def compute_features(
         starts = tree.groupby("root_id")["ts"].min().sort_values()
         order = starts.index.tolist()
 
-    author_feats = _author_features(authors, order)
+    start_seconds = {
+        root: float(ts.timestamp())
+        for root, ts in tree.groupby("root_id")["ts"].min().items()
+    }
+    author_feats = _author_features(authors, order, start_seconds)
 
     # When the seed post was published, taken from its own authored edge.
     root_ts_map: dict[str, pd.Timestamp] = {}
