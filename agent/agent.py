@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import urllib.request
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -48,11 +49,21 @@ GROQ_RATE_LIMIT_SLEEP = 5        # seconds to wait between investigations to avo
 SWEEP_INTERVAL_SECONDS = int(os.getenv("AGENT_SWEEP_INTERVAL", "60"))
 SWEEP_BATCH_SIZE = int(os.getenv("AGENT_SWEEP_BATCH", "50"))
 
+GROQ_API_BASE = "https://api.groq.com/openai/v1"
+GROQ_PROBE_TIMEOUT = 10  # seconds to decide whether Groq is usable
+
+# Inference backend, resolved once on first use.
+_llm: LLM | None = None
+
 log = logging.getLogger(__name__)
 
 _INVESTIGATION_PROMPT = (
     "You are an intelligence analyst investigating how a trending topic spread online.\n"
-    "Use get_propagation_path, search_similar_trends, and classify_virality to gather evidence.\n"
+    "Gather evidence with the available tools. classify_virality_model is the "
+    "strongest single piece of evidence when it is available — weigh it above raw "
+    "counts, but do not ignore what the other tools show.\n"
+    "Call each tool at most once, then answer. Do not repeat a tool call you have "
+    "already made.\n"
     "After your investigation respond with ONLY a JSON object in this exact format:\n"
     "{\n"
     '  "classification": "organic" | "coordinated_amplification" | "uncertain",\n'
@@ -63,21 +74,66 @@ _INVESTIGATION_PROMPT = (
 )
 
 
+def _groq_model_available(api_key: str, model: str) -> bool:
+    """
+    Check that the key works and actually serves the configured model.
+
+    Presence of a key proves nothing: it can be revoked, scoped, or name a model
+    that has since been decommissioned. Without this probe the agent selects Groq,
+    fails on every investigation, and never falls back — the local model sitting
+    ready the whole time.
+    """
+    request = urllib.request.Request(
+        f"{GROQ_API_BASE}/models", headers={"Authorization": f"Bearer {api_key}"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=GROQ_PROBE_TIMEOUT) as response:
+            payload = json.load(response)
+    except Exception as exc:
+        # Never log the exception body — it can echo the Authorization header.
+        log.warning("Groq unreachable (%s); using local model", type(exc).__name__)
+        return False
+
+    available = {entry.get("id") for entry in payload.get("data", [])}
+    if model not in available:
+        log.warning(
+            "Groq model %r not available to this key; using local model", model
+        )
+        return False
+    return True
+
+
 def _build_llm() -> LLM:
+    """
+    Select the inference backend once per process and cache it.
+
+    Groq is preferred when usable; otherwise the local Ollama model. Rebuilding
+    per investigation would repeat the probe and construct a fresh client every
+    time the agent wakes.
+    """
+    global _llm
+    if _llm is not None:
+        return _llm
+
     groq_key = os.getenv("GROQ_API_KEY", "")
-    if groq_key:
+    groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    if groq_key and _groq_model_available(groq_key, groq_model):
         from llama_index.llms.groq import Groq
-        model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-        log.info("LLM: Groq (%s)", model)
-        return Groq(model=model, api_key=groq_key)
+
+        log.info("LLM: Groq (%s)", groq_model)
+        _llm = Groq(model=groq_model, api_key=groq_key)
+        return _llm
+
     from llama_index.llms.ollama import Ollama
+
     chat_model = os.getenv("OLLAMA_CHAT_MODEL", "llama3.2")
-    log.info("LLM: Ollama fallback (%s)", chat_model)
-    return Ollama(
+    log.info("LLM: Ollama (%s)", chat_model)
+    _llm = Ollama(
         model=chat_model,
         base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
         request_timeout=OLLAMA_REQUEST_TIMEOUT,
     )
+    return _llm
 
 
 _REQUIRED_KEYS = {"classification", "confidence", "signals", "reasoning_steps"}
