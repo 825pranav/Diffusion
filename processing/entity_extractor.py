@@ -10,7 +10,9 @@ authorship or topic membership. Cascade traversal and feature extraction walk
 `reshare` edges exclusively, so without them every cascade is a single node.
 
 Rule-based extraction handles all structured fields; spaCy en_core_web_sm
-(CPU, ~12 MB) handles NER on free text.
+(CPU, ~12 MB) handles NER on free text — but only where the record is tagged
+English. The model is English-only and does not decline on other languages, it
+invents entities, and those go on to trip the anomaly detector.
 
 The model is loaded once at first call and reused — no GPU required.
 """
@@ -69,6 +71,24 @@ class Edge:
 class EntitySet:
     nodes: list[Node] = field(default_factory=list)
     edges: list[Edge] = field(default_factory=list)
+
+
+def is_ner_supported(langs: list[str] | None) -> bool:
+    """
+    Whether the NER model can be trusted on this record's language.
+
+    en_core_web_sm is English-only, and the Bluesky firehose is heavily
+    multilingual. Run on Hindi or Japanese it does not decline — it returns
+    confident nonsense, and those junk entities then accumulate mentions and
+    trip the anomaly detector. On a live capture the loudest "trending topics"
+    were an untranslated Hindi phrase and a lone Japanese bracket.
+
+    An untagged record is allowed through: most are English, and dropping them
+    would silently discard a large share of the stream.
+    """
+    if not langs:
+        return True
+    return any(lang.split("-")[0].lower() == "en" for lang in langs)
 
 
 def _ner_nodes_and_edges(
@@ -159,7 +179,7 @@ def _extract_bluesky(record: dict) -> EntitySet:
             timestamp=ts,
         ))
 
-    if text:
+    if text and is_ner_supported(record.get("langs")):
         ent_nodes, ent_edges = _ner_nodes_and_edges(text, content_id, "bluesky", ts)
         es.nodes.extend(ent_nodes)
         es.edges.extend(ent_edges)
@@ -209,7 +229,7 @@ def _extract_mastodon(record: dict) -> EntitySet:
             timestamp=ts,
         ))
 
-    if text:
+    if text and is_ner_supported(record.get("langs")):
         ent_nodes, ent_edges = _ner_nodes_and_edges(text, content_id, "mastodon", ts)
         es.nodes.extend(ent_nodes)
         es.edges.extend(ent_edges)

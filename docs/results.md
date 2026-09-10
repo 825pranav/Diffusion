@@ -220,3 +220,106 @@ Out-of-fold classifier accuracy is 0.863, so both gates are choosing
 between genuinely uncertain outcomes rather than reading an easy signal.
 
 Reproduce with `python -m ml.deferral`.
+
+## Live traffic — observed cascades
+
+Live Bluesky and Hacker News traffic ingested through the real producer
+serialisation and `processing.consumer.handle()` — dedup, spaCy NER, graph
+writes, velocity scoring and anomaly detection — with Kafka omitted as transport
+(see `scripts/ingest_live.py`).
+
+### What was ingested
+
+| platform | edge type | count |
+|---|---|---|
+| bluesky | `authored` | 133,174 |
+| bluesky | `reshare` | 103,544 |
+| bluesky | `mentions` | 57,875 |
+| hn | `authored` | 353 |
+| hn | `mentions` | 215 |
+
+| platform | node type | count |
+|---|---|---|
+| bluesky | `content` | 174,718 |
+| bluesky | `author` | 50,898 |
+| bluesky | `named_entity` | 35,947 |
+| hn | `content` | 353 |
+| hn | `author` | 267 |
+| hn | `named_entity` | 166 |
+
+### Observed cascade shape
+
+| metric | cascades | p50 | p90 | max |
+|---|---|---|---|---|
+| size (posts) | 3,000 | 2 | 5 | 126 |
+| depth | 3,000 | 1 | 2 | 13 |
+
+A firehose is a sample, not an archive: a reply whose parent was never captured
+still forms a two-node tree, so the distribution is dominated by small cascades.
+980 of 3,000 observed cascades reach 3+ posts.
+
+### Does the simulator resemble reality?
+
+| feature | real p50 | real p90 | simulated p50 | simulated p90 |
+|---|---|---|---|---|
+| `size` | 4.00 | 9.00 | 27.00 | 75.00 |
+| `max_depth` | 1.00 | 2.00 | 4.00 | 6.00 |
+| `root_fanout_share` | 1.00 | 1.00 | 0.51 | 0.82 |
+| `leaf_frac` | 0.67 | 0.88 | 0.63 | 0.80 |
+| `delay_median_s` | 236.97 | 685.99 | 140.92 | 892.31 |
+
+This is the check on everything trained upstream, and it splits two ways.
+
+**Timing transfers.** Median inter-arrival delay and leaf fraction land close to
+the simulated values, so the temporal model the classifier leans on describes
+something real.
+
+**Structure does not.** Observed cascades are far smaller and shallower, with
+root fan-out share pinned near 1.0 — almost every captured reply attaches
+directly to a seed. That is mostly sampling: from a firehose you see replies to a
+post far more often than replies to replies, so deep chains are invisible even
+where they exist. It is not evidence that real cascades are flat.
+
+### Classifier applied to live traffic
+
+| P(coordinated) | cascades | share |
+|---|---|---|
+| 0.0–0.2 | 633 | 64.6% |
+| 0.2–0.4 | 143 | 14.6% |
+| 0.4–0.6 | 114 | 11.6% |
+| 0.6–0.8 | 68 | 6.9% |
+| 0.8–1.0 | 22 | 2.2% |
+
+Reported as a distribution, not accuracy. Real cascades carry no ground-truth
+label — that absence is precisely why the simulator exists — so what the model
+asserts about live data is measurable, and whether it is correct is not.
+
+**These scores are out of domain and should be read as such.** `max_depth` and
+`root_fanout_share` are among the classifier's inputs, and both sit far outside
+the range it was trained on. A model asked about inputs it has never seen will
+still return a confident number, and that number is not trustworthy just because
+it is well-formed. Closing this gap needs either a longer, denser capture that
+reconstructs whole threads — backfilling parents through the API rather than
+waiting for them to float past — or a simulator whose sampling mirrors what a
+firehose actually reveals.
+
+### One observed propagation
+
+```
+seed  ·  (not captured)
+  +      0s  depth 1  (repost)
+  +      9s  depth 1  (repost)
+  +     11s  depth 1  (repost)
+  +     12s  depth 1  (repost)
+  +     29s  depth 1  (repost)
+  +     86s  depth 1  (repost)
+  +     89s  depth 1  (repost)
+  +     90s  depth 1  (repost)
+  +    112s  depth 1  (repost)
+  +    118s  depth 1  Just saw it on Labor Day, and I loved it! This movie deserves its crowning achie
+  +    163s  depth 1  (repost)
+  +    163s  depth 1  (repost)
+```
+
+Reproduce with `python -m scripts.ingest_live --minutes 20` then
+`python -m ml.analyze_real`.

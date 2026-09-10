@@ -246,11 +246,17 @@ still forms a two-node tree, so the distribution is dominated by small cascades.
 
 {shape_comparison(real, sim) if not real.empty else "_not enough real cascades to compare_"}
 
-The comparison is the check on everything trained upstream. Simulated cascades
-are grown to a target size and so are far larger than a sampled firehose shows;
-the shape features — depth, root fan-out share, leaf fraction — are the ones
-worth reading, because they describe structure rather than how much of it was
-captured.
+This is the check on everything trained upstream, and it splits two ways.
+
+**Timing transfers.** Median inter-arrival delay and leaf fraction land close to
+the simulated values, so the temporal model the classifier leans on describes
+something real.
+
+**Structure does not.** Observed cascades are far smaller and shallower, with
+root fan-out share pinned near 1.0 — almost every captured reply attaches
+directly to a seed. That is mostly sampling: from a firehose you see replies to a
+post far more often than replies to replies, so deep chains are invisible even
+where they exist. It is not evidence that real cascades are flat.
 
 ### Classifier applied to live traffic
 
@@ -259,6 +265,15 @@ captured.
 Reported as a distribution, not accuracy. Real cascades carry no ground-truth
 label — that absence is precisely why the simulator exists — so what the model
 asserts about live data is measurable, and whether it is correct is not.
+
+**These scores are out of domain and should be read as such.** `max_depth` and
+`root_fanout_share` are among the classifier's inputs, and both sit far outside
+the range it was trained on. A model asked about inputs it has never seen will
+still return a confident number, and that number is not trustworthy just because
+it is well-formed. Closing this gap needs either a longer, denser capture that
+reconstructs whole threads — backfilling parents through the API rather than
+waiting for them to float past — or a simulator whose sampling mirrors what a
+firehose actually reveals.
 
 ### One observed propagation
 

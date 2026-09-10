@@ -141,3 +141,34 @@ def test_standalone_post_has_no_reshare_edge():
         }
     )
     assert not any(e.edge_type == "reshare" for e in es.edges)
+
+
+def test_ner_is_skipped_for_unsupported_languages():
+    """
+    en_core_web_sm returns confident nonsense on non-English text.
+
+    On a live Bluesky capture the loudest "trending topics" were an
+    untranslated Hindi phrase and a lone Japanese bracket, both NER artefacts
+    that went on to trip the anomaly detector.
+    """
+    es = extract_entity_set(
+        {
+            "platform": "bluesky", "id": "x1", "type": "post", "author": "a",
+            "text": "पचासी लाख रुपये की कीमत", "langs": ["hi"],
+            "ingested_at": "2026-01-01T00:00:00Z",
+        }
+    )
+    assert not any(n.type == "named_entity" for n in es.nodes)
+    # authorship is still recorded — only entity extraction is skipped
+    assert any(e.edge_type == "authored" for e in es.edges)
+
+
+def test_ner_runs_for_english_and_untagged_records():
+    from processing.entity_extractor import is_ner_supported
+
+    assert is_ner_supported(["en"]) is True
+    assert is_ner_supported(["en-US"]) is True
+    assert is_ner_supported([]) is True      # most untagged posts are English
+    assert is_ner_supported(None) is True
+    assert is_ner_supported(["ja"]) is False
+    assert is_ner_supported(["hi", "ur"]) is False
