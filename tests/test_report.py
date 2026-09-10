@@ -38,3 +38,10 @@ def test_markdown_table_shape():
     assert lines[0] == "| x | y |"
     assert lines[1] == "|---|---|"
     assert lines[2] == "| 1 | 2 |"
+
+
+def test_body_leading_blank_lines_are_trimmed(tmp_path):
+    """Callers pass triple-quoted blocks that open with a newline."""
+    path = tmp_path / "results.md"
+    upsert_section("Alpha", "\n\nbody text\n", path)
+    assert "## Alpha\n\nbody text\n" in path.read_text(encoding="utf-8")

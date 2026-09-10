@@ -172,7 +172,10 @@ def _peak_rate_per_min(sorted_epochs: np.ndarray) -> float:
 
 
 def _structure_and_timing(
-    group: pd.DataFrame, root_id: str, root_ts: pd.Timestamp | None = None
+    group: pd.DataFrame,
+    root_id: str,
+    root_ts: pd.Timestamp | None = None,
+    root_platform: str | None = None,
 ) -> dict[str, float]:
     """
     Features derived from one cascade's reshare edges.
@@ -218,7 +221,17 @@ def _structure_and_timing(
 
     platforms = group["platform"].nunique()
     platform_of = dict(zip(group["target_id"], group["platform"], strict=True))
-    platform_of[root_id] = group.loc[group["ts"].idxmin(), "platform"]
+    # The seed's platform comes from its authored edge. Falling back to the
+    # earliest reshare edge reads the *first child's* platform instead, which
+    # flips the cross-platform flag for every root-attached child whenever that
+    # child happened to hop. Measured at 0.4% of cascades — a hop adds lag, so
+    # the earliest child is nearly always same-platform — but the error would
+    # land unevenly, since root attachment is what separates the classes.
+    platform_of[root_id] = (
+        root_platform
+        if root_platform is not None
+        else group.loc[group["ts"].idxmin(), "platform"]
+    )
     parent_platform = group["source_id"].map(platform_of)
     cross = parent_platform.ne(group["platform"])
     cross_frac = float(cross.mean()) if n_edges else 0.0
@@ -318,15 +331,26 @@ def compute_features(
 
     # When the seed post was published, taken from its own authored edge.
     root_ts_map: dict[str, pd.Timestamp] = {}
+    root_platform_map: dict[str, str] = {}
     if not authors.empty:
         seeds = authors[authors["content_id"] == authors["root_id"]]
         if not seeds.empty:
             root_ts_map = seeds.groupby("root_id")["ts"].min().to_dict()
+            root_platform_map = (
+                seeds.sort_values("ts").groupby("root_id")["platform"].first().to_dict()
+            )
 
     rows = []
     for root_id, group in tree.groupby("root_id", sort=False):
         row = {"root_node_id": root_id}
-        row.update(_structure_and_timing(group, root_id, root_ts_map.get(root_id)))
+        row.update(
+            _structure_and_timing(
+                group,
+                root_id,
+                root_ts_map.get(root_id),
+                root_platform_map.get(root_id),
+            )
+        )
         row.update(author_feats.get(root_id, {}))
         rows.append(row)
 

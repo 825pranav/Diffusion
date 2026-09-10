@@ -160,3 +160,20 @@ def test_epoch_conversion_is_resolution_independent():
     nanos = micros.dt.as_unit("ns")
     assert to_epoch_seconds(micros).tolist() == to_epoch_seconds(nanos).tolist()
     assert to_epoch_seconds(micros)[1] - to_epoch_seconds(micros)[0] == pytest.approx(60.0)
+
+
+def test_root_platform_comes_from_its_authored_edge():
+    """
+    The seed's platform must not be read off its earliest reshare edge.
+
+    Here the first child hopped platforms, so inferring from that edge would
+    label the root 'bluesky' and mark the second, same-platform child as a hop.
+    """
+    tree = _tree([("r", "c1", 60, 1), ("r", "c2", 120, 1)])
+    tree.loc[0, "platform"] = "bluesky"  # first child hopped
+    authors = _authors([("r", "a0", 0), ("c1", "a1", 60), ("c2", "a2", 120)])
+
+    row = compute_features(tree, authors).iloc[0]
+    # Exactly one of the two edges is a genuine hop.
+    assert row["cross_platform_edge_frac"] == pytest.approx(0.5)
+    assert row["first_hop_lag_s"] == pytest.approx(60.0)

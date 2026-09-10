@@ -41,7 +41,9 @@ def upsert_section(heading: str, body: str, path: pathlib.Path = RESULTS_PATH) -
     text = path.read_text(encoding="utf-8") if path.exists() else _HEADER
 
     marker = f"## {heading}"
-    section = f"{marker}\n\n{body.rstrip()}\n"
+    # strip(), not rstrip(): callers pass triple-quoted blocks that open with a
+    # newline, which would leave a blank line hanging under every heading.
+    section = f"{marker}\n\n{body.strip()}\n"
 
     lines = text.splitlines()
     start = next((i for i, line in enumerate(lines) if line.strip() == marker), None)
