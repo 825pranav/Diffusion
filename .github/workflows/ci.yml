@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        # llama-index-core 0.10.52 declares numpy<2 but runs correctly on the
+        # numpy 2 that scipy and lightgbm require. Installing it last and then
+        # restoring numpy keeps the working combination; the resolver warning is
+        # expected. See PROGRESS.md.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "numpy>=2.1,<2.8"
+          python -m spacy download en_core_web_sm
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        # The suite is pure — no Postgres, Kafka, or model server. Anything
+        # needing those belongs in the e2e script, which runs against a live
+        # stack rather than in CI.
+        run: pytest

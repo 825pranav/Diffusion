@@ -1,0 +1,28 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Repo root on sys.path so `import processing`, `import ml`, ... resolve.
+pythonpath = ["."]
+addopts = "-q --strict-markers"
+filterwarnings = [
+    # llama-index 0.10 pins numpy<2 but runs fine on the numpy 2 that
+    # scipy/lightgbm require; the resolver warning is deliberate.
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",  # long lines are mostly SQL and prose in docstrings
+    "B008",  # FastAPI Depends()/Query() in defaults is the framework idiom
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Scripts prepend the repo root to sys.path before importing project packages.
+"scripts/*.py" = ["E402"]
+"simulation/generate.py" = ["E402"]
+"ml/evaluate.py" = ["E402"]

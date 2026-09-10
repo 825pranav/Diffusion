@@ -1,29 +1,44 @@
 # Ingestion
-aiohttp==3.9.5
-aiokafka==0.10.0
-python-dotenv==1.0.1
+aiohttp==3.14.3
+aiokafka==0.14.0
+python-dotenv==1.2.3
 
 # Stream processing
-spacy==3.7.5
+spacy==3.8.16
+# NER model (not on PyPI as a dependency):
+#   python -m spacy download en_core_web_sm
 
 # Database
-asyncpg==0.29.0
-psycopg2-binary==2.9.9
+asyncpg==0.31.0
+# Embedded PostgreSQL 16 + pgvector, so local development needs no Docker.
+# See scripts/devdb.py.
+pgserver==0.1.4
+
+# Machine learning
+lightgbm==4.7.0
+scikit-learn==1.9.1
+pandas==3.0.5
+numpy>=2.1,<2.8
+scipy==1.18.1
+joblib==1.6.0
+matplotlib==3.11.1
 
 # Agent
+# Held at 0.10.x: 0.14 removes ReActAgent.from_tools, which agent/agent.py is
+# built on. It declares numpy<2 but runs correctly on the numpy 2 that scipy and
+# lightgbm require, so pip prints a resolver warning that is expected and
+# deliberate -- install it before restoring numpy.
 llama-index-core==0.10.52
 llama-index-llms-groq==0.1.4
-llama-index-llms-ollama==0.1.5
-llama-index-embeddings-huggingface==0.2.2
-
-# Evaluation
-ragas==0.1.14
-datasets==2.20.0
+llama-index-llms-ollama==0.2.2
 
 # API
-fastapi==0.111.0
-uvicorn[standard]==0.30.1
-websockets==12.0
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+websockets==17.1
+pydantic==2.13.5
 
-# Utilities
-pydantic==2.7.0
+# Development
+pytest==9.1.1
+pytest-asyncio==1.4.0
+ruff==0.16.7

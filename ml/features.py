@@ -171,15 +171,27 @@ def _peak_rate_per_min(sorted_epochs: np.ndarray) -> float:
     return float(counts.max()) * (60.0 / PEAK_WINDOW_SECONDS)
 
 
-def _structure_and_timing(group: pd.DataFrame, root_id: str) -> dict[str, float]:
-    """Features derived from one cascade's reshare edges."""
+def _structure_and_timing(
+    group: pd.DataFrame, root_id: str, root_ts: pd.Timestamp | None = None
+) -> dict[str, float]:
+    """
+    Features derived from one cascade's reshare edges.
+
+    `root_ts` is when the seed post was published, which comes from its authored
+    edge — the reshare edges only carry child timestamps. Falling back to the
+    earliest child would put the origin *after* the root, forcing the first
+    root-attached child to a delay of zero and measuring every sibling from it
+    instead. Since root attachment is exactly what separates the two classes,
+    that error would land unevenly on them.
+    """
     n_edges = len(group)
     size = n_edges + 1  # edges + the root post
 
     # Parent timestamp per edge, so the delay is the true parent -> child gap
     # rather than the gap between consecutive events anywhere in the cascade.
-    ts_by_node = dict(zip(group["target_id"], group["ts"]))
-    root_ts = group["ts"].min()
+    ts_by_node = dict(zip(group["target_id"], group["ts"], strict=True))
+    if root_ts is None:
+        root_ts = group["ts"].min()
     ts_by_node[root_id] = root_ts
 
     parent_ts = group["source_id"].map(ts_by_node)
@@ -192,7 +204,7 @@ def _structure_and_timing(group: pd.DataFrame, root_id: str) -> dict[str, float]
     root_fanout = float(children.get(root_id, 0))
 
     epochs = np.sort(to_epoch_seconds(group["ts"]))
-    t0 = float(root_ts.timestamp())
+    t0 = float(pd.Timestamp(root_ts).timestamp())
     duration = float(epochs.max() - t0) if epochs.size else 0.0
     half_idx = max(int(np.ceil(epochs.size / 2)) - 1, 0)
     time_to_half = float(epochs[half_idx] - t0) if epochs.size else 0.0
@@ -205,7 +217,7 @@ def _structure_and_timing(group: pd.DataFrame, root_id: str) -> dict[str, float]
     leaves = size - len(internal)
 
     platforms = group["platform"].nunique()
-    platform_of = dict(zip(group["target_id"], group["platform"]))
+    platform_of = dict(zip(group["target_id"], group["platform"], strict=True))
     platform_of[root_id] = group.loc[group["ts"].idxmin(), "platform"]
     parent_platform = group["source_id"].map(platform_of)
     cross = parent_platform.ne(group["platform"])
@@ -304,10 +316,17 @@ def compute_features(
 
     author_feats = _author_features(authors, order)
 
+    # When the seed post was published, taken from its own authored edge.
+    root_ts_map: dict[str, pd.Timestamp] = {}
+    if not authors.empty:
+        seeds = authors[authors["content_id"] == authors["root_id"]]
+        if not seeds.empty:
+            root_ts_map = seeds.groupby("root_id")["ts"].min().to_dict()
+
     rows = []
     for root_id, group in tree.groupby("root_id", sort=False):
         row = {"root_node_id": root_id}
-        row.update(_structure_and_timing(group, root_id))
+        row.update(_structure_and_timing(group, root_id, root_ts_map.get(root_id)))
         row.update(author_feats.get(root_id, {}))
         rows.append(row)
 
