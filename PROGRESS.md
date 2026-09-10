@@ -1,154 +1,223 @@
-# Diffusion — improvement brief progress
+# Diffusion — where things stand
 
-Living document. Updated as each task lands. Started 2026-09-11.
+Working context. Read this first when picking the project back up.
+Last updated 2026-09-11.
 
-**Goal:** turn the LLM-guessing agent into a real, evaluated ML system, keeping the
-streaming architecture as-is.
+**What changed:** the project went from an LLM guessing at verdicts to a measured
+ML system — a difficulty-calibrated cascade simulator, a trained and calibrated
+classifier, a derived review gate, and a live ingestion run against real Bluesky
+and Hacker News traffic.
 
 ---
 
-## Status at a glance
+## Resume in three commands
+
+```bash
+python -m scripts.devdb start      # embedded Postgres + schema, writes DATABASE_URL
+pytest                             # 95 tests, no services needed
+uvicorn api.main:app --reload      # API + agent listener + embedding indexer
+```
+
+Everything else (`ml.train`, `ml.evaluate`, `scripts.ingest_live`, …) is listed in
+the README under **Running Locally**. The `.venv` is already built and the
+database still holds the simulated dataset *and* the live capture.
+
+---
+
+## Status
 
 | # | Task | Status |
 |---|------|--------|
-| — | Local environment (no Docker) | ✅ done |
-| 0 | Unblock the pipeline | ✅ done — `validate_e2e.py` passes end to end |
-| 1 | Labeled cascade simulator | ✅ done — 2 000 cascades, calibrated overlap |
-| 2 | Real virality classifier | ✅ done — F1 0.854 ± 0.023, exposed as an agent tool |
-| 3 | Evaluation harness + calibration | 🟡 classifier arm + gate done; LLM/hybrid arms running |
-| 4 | Better anomaly baseline | ✅ done — median/MAD now the default |
-| 5 | Retrieval correctness + eval | 🟡 fix landed; benchmark re-running after Task 3 |
-| 6 | Tests + CI | ✅ done — 82 tests, ruff clean, GitHub Actions |
-| — | Optional cleanup | ✅ done — KRaft, repinned deps, README rewritten |
+| 0 | Unblock the pipeline | ✅ `validate_e2e.py` passes end to end |
+| 1 | Labeled cascade simulator | ✅ 2 000 cascades, overlap calibrated |
+| 2 | Virality classifier | ✅ F1 0.882, exposed as an agent tool |
+| 3 | Evaluation + calibration | ✅ three arms, reliability diagram, derived gate |
+| 4 | Anomaly baseline | ✅ median/MAD default, 3.5× fewer false alarms |
+| 5 | Retrieval correctness | ✅ partial HNSW index, recall measured |
+| 6 | Tests + CI | ✅ 95 tests, ruff clean, GitHub Actions |
+| — | Live ingestion | ✅ real Bluesky + HN, cascades characterised |
+| — | Learned deferral | ✅ built, **negative result**, not wired in |
 
 ---
 
-## Next up
+## Results
 
-1. **Task 3** — the LLM and hybrid arms are running against local `qwen2.5:7b`
-   (24 sampled holdout cascades per arm, roughly a minute each). When they finish,
-   `docs/results.md` gets the three-way comparison and the reliability diagram.
-2. **Task 5** — re-run `python -m ml.eval_retrieval` once the LLM arms are done.
-   It was deferred deliberately: it loads 10 000 benchmark vectors into
-   `trend_embeddings` and reindexes, which would perturb the similarity search the
-   agent is using mid-evaluation.
-
----
-
-## Results so far
-
-Full tables in [`docs/results.md`](docs/results.md).
+Full tables in [`docs/results.md`](docs/results.md), all script-generated.
 
 | Measurement | Result |
 |---|---|
-| Classifier, 5-fold CV | F1 **0.854 ± 0.023**, ROC-AUC 0.921 |
-| Classifier, held-out (400) | F1 **0.854**, ROC-AUC 0.938, Brier 0.122 |
-| Anomaly baseline | median/MAD cuts false alarms **3.5×** vs z-score (5.06 → 1.44 per topic-day) for 7 points of recall |
-| Filtered vector search | table-wide HNSW returns **< 3 of 5** requested rows at 5% selectivity; partial index returns 5 |
-| Review gate | **0.85** (91% accuracy, 75% auto-published), read off the reliability curve |
+| Classifier, 5-fold CV | F1 **0.882 ± 0.039**, ROC-AUC 0.929 |
+| Classifier, held out (400) | F1 **0.882**, ROC-AUC 0.938, Brier **0.086** |
+| By subtype | `plain` 0.941 · `viral_organic` 0.781 · `stealth_coordinated` 0.393 |
+| Review gate | **0.55**, derived — 90.7% accuracy at 96.8% coverage |
+| Anomaly baseline | median/MAD cuts false alarms **3.5×** vs z-score (5.06 → 1.44 per topic-day) |
+| Filtered vector search | table-wide HNSW returns **2.46 of 5** rows at 5% selectivity; partial index returns 5 |
+| Learned deferral | 0.958 vs 0.957 for confidence — **no gain** |
+| Live capture | **103,544 reshare edges**, 262,349 real nodes from Bluesky + HN |
+| Live cascades | 3,000 observed, 980 with 3+ posts, max size 126, max depth 13 |
 
-Top features by gain: `time_to_half_s`, `prior_author_mean`,
-`cross_platform_edge_frac`, `delay_median_s`, `mean_children`. No single feature
-dominates, which is the point — an early simulator gave F1 0.97 because two
-parameters had non-overlapping ranges per class.
+---
+
+## The findings worth remembering
+
+**1. A feature drifted across its own train/test split.**
+Author reuse was counted cumulatively from the start of the dataset, so it grew
+without bound: `prior_author_mean` shifted 1.7 sd between train and holdout, and
+`prior_author_frac` saturated at exactly 1.000 — no information at all — while
+being the strongest feature by gain. Nothing errored. Windowing it to a trailing
+six hours took F1 from 0.845 → 0.882, Brier 0.119 → 0.086, and `viral_organic`
+accuracy 0.500 → 0.781.
+
+**2. Learned deferral does not work here, and the reason matters.**
+A second model was trained to predict whether the classifier would be right
+(out-of-fold labels, so difficulty is learned not memorised). It ties confidence
+gating. Both gates publish a quarter of `stealth_coordinated` and get *every one*
+wrong — those cascades are generated to look organic, so they are
+feature-indistinguishable from the real thing, and a deferral model reading the
+same features cannot flag what the classifier cannot separate. **The remaining
+gap needs new features, not a better gate.**
+
+**3. The LLM is the weakest link, and the LLM measurement is itself weak.**
+A local 7B reasoning over graph structure lands around chance, far below the
+classifier's 0.938 — so routing a verdict through it costs accuracy, and its
+value is the case file it writes rather than the label it picks. But do not read
+the `llm` and `hybrid` rows as a ranking. Three single runs of an unchanged
+configuration produced:
+
+    run    llm ROC-AUC    hybrid ROC-AUC
+     1        0.602           0.833
+     2        0.424           0.535
+     3        0.571           0.359
+
+The hybrid arm spans 0.47 AUC and the llm arm 0.18, on samples of ~15 verdicts.
+Noise dwarfs the effect. `ml/evaluate.py` now takes `--llm-repeats` and reports
+mean with the observed range, so the table cannot imply precision it does not
+have. Getting a real comparison needs a stronger model and a sample in the
+hundreds — a rate-limit and runtime problem, not a design one.
+
+**4. Running on real traffic found a bug simulation never could.**
+The anomaly detector's loudest "trending topics" were a Hindi phrase and a lone
+Japanese bracket, firing repeatedly. `en_core_web_sm` is English-only and the
+firehose is multilingual; given other languages it does not decline, it invents
+entities, which then accumulate mentions and trip the detector. The detector was
+working correctly on garbage input. Records already carried `langs`, so the guard
+was free.
 
 ---
 
 ## Environment
 
-The machine has no Docker, no WSL, and no system PostgreSQL, so the compose stack
-could not be used. Rather than skip the database, local development runs on an
-embedded PostgreSQL:
+No Docker, WSL, or system PostgreSQL on this machine, so local development runs
+on an embedded database rather than the compose stack.
 
-| Component | How it runs locally | Notes |
+| Component | How it runs | Notes |
 |---|---|---|
-| PostgreSQL 16.2 | `pgserver` wheel, embedded | No Docker required |
-| pgvector 0.6.2 | Bundled with `pgserver` | **< 0.8, so `iterative_scan` is unavailable** — Task 5 uses partial HNSW indexes |
-| LLM | Ollama `qwen2.5:7b` | `llama3.2` (3B) could not finish a ReAct loop — it exhausted `max_iterations` every time |
-| Embeddings | Ollama `nomic-embed-text` | 768-dim, matches the existing schema |
-| Kafka | **not running** | Needs Docker. Only the live ingestion path depends on it — no Task 0–6 deliverable does. |
-
-### Setup
-
-```bash
-python -m venv .venv
-.venv/Scripts/python -m pip install -r requirements.txt
-.venv/Scripts/python -m spacy download en_core_web_sm
-python -m scripts.devdb start      # embedded Postgres + schema, writes DATABASE_URL
-```
+| PostgreSQL 16.2 | `pgserver` wheel, embedded | `python -m scripts.devdb start` |
+| pgvector 0.6.2 | bundled | **< 0.8**, so `iterative_scan` is unavailable — hence partial HNSW indexes |
+| LLM (hosted) | Groq `openai/gpt-oss-120b` | key works; free tier 429s under bulk evaluation |
+| LLM (local) | Ollama `qwen2.5:7b` | used for the evaluation arms; weak at ReAct |
+| Embeddings | Ollama `nomic-embed-text` | 768-dim, matches the schema |
+| Kafka | **not running** | Docker Desktop installed but won't start without a reboot |
 
 ### Dependency notes
 
-- `llama-index-core` is held at **0.10.52**. 0.14 removes `ReActAgent.from_tools`,
-  which `agent/agent.py` is built on. It declares `numpy<2` but runs correctly on
-  the numpy 2 that scipy and lightgbm require; install it *before* restoring numpy.
-  The pip resolver warning is expected.
-- `spacy` moved to 3.8.x — 3.7.5 has no Python 3.12 wheels.
+- `llama-index-core` pinned at **0.10.52** — 0.14 removes `ReActAgent.from_tools`,
+  which `agent/agent.py` is built on. It declares `numpy<2` but runs fine on the
+  numpy 2 that scipy and lightgbm need; install it *before* restoring numpy. The
+  pip resolver warning is expected.
+- `spacy` on 3.8.x — 3.7.5 has no Python 3.12 wheels.
 
 ---
 
-## Open items requiring the user
+## Open items
 
-- [ ] **Groq API key is rejected.** The key in `.env` returns HTTP 403 from
-      `/v1/models`, and `GROQ_MODEL` still names `llama-3.3-70b-versatile`, which
-      Groq has decommissioned. The agent now probes and falls back to Ollama, so
-      nothing is blocked — but a working key would make Task 3's LLM and hybrid
-      arms far stronger than a local 7B model can manage. Replace the key and set
-      `GROQ_MODEL` to a model that key serves.
-- [ ] **Docker Desktop** — `winget install --id Docker.DockerDesktop` (needs
-      admin). Unblocks Kafka and the live ingestion path only. The KRaft compose
-      file is committed but **untested**, since this machine cannot run it.
+- [ ] **Reboot to finish Docker Desktop.** It installs but the engine won't
+      start until Windows restarts. Then `docker compose up -d` brings up Kafka
+      (KRaft, no ZooKeeper) and the compose Postgres. The compose file is
+      committed but **has never been run** — that is the one untested piece.
+- [ ] **Groq bulk evaluation is rate-limited.** The key is valid and
+      `openai/gpt-oss-120b` answers in ~1.6 s, but one investigation is 4–8 rapid
+      calls and the free tier 429s throughout a 40-cascade run. `--llm-delay`
+      exists; a paid tier or a smaller Groq model would fix it properly.
+- [ ] **Live classifier scores are out of domain.** Observed cascades are far
+      shallower than simulated ones (`max_depth` p50 1 vs 4), because a firehose
+      shows replies-to-posts far more often than replies-to-replies. The model
+      still returns confident numbers on inputs it was never trained on.
+- [ ] **Anomalies re-fire on the same entity.** A sustained elevated topic
+      triggers repeatedly with no per-entity cooldown, so one trend can occupy
+      the agent many times over. 278 anomalies fired during a 25-minute capture,
+      most of them repeats of a handful of entities.
+
+---
+
+## What I would do next, ranked
+
+1. **Backfill cascade parents through the Bluesky API.** The single highest-value
+   change. Right now a reply whose parent never floated past becomes a two-node
+   tree, which is why real cascades look flat and why classifier scores on live
+   data are out of domain. Fetching parents on demand reconstructs whole threads
+   and makes the live numbers trustworthy.
+2. **New features for `stealth_coordinated`.** Account age, posting-schedule
+   regularity, or coordination structure *across* cascades rather than within
+   one. This is the documented ceiling — no gating or model change touches it.
+3. **Re-run the LLM arms properly.** Current numbers are a local 7B over ~17
+   verdicts, where run-to-run variance swamps the difference between arms. Needs
+   Groq (rate limits permitting) and a sample in the hundreds before the
+   `llm` vs `hybrid` comparison means anything.
+4. **Calibrate explicitly** (isotonic/Platt) and re-derive the gate. Brier is
+   already 0.086 after the drift fix, so gains will be smaller than they would
+   have been, but it makes the probabilities defensible rather than incidental.
 
 ---
 
 ## Decision log
 
-Choices worth remembering, with the reasoning:
-
-- **Embedded Postgres over skipping the DB.** Tasks 0–5 all need real SQL; mocking
-  it would have made every measured number meaningless.
-- **pgvector 0.6.2 constrains Task 5.** `iterative_scan` (0.8+) is unavailable, so
-  the filtered-search fix is partial HNSW indexes per `(model_name, model_version)`.
-- **Ollama over waiting for a Groq key** — and then the key turned out to be
-  rejected anyway, which is what exposed the missing fallback.
-- **Size is deliberately not a class signal.** Target cascade size is drawn from
-  one distribution for both classes, so the model cannot lean on raw size and has
-  to learn timing, structure, and author reuse. A useless `size` feature is an
-  honest result.
+- **Embedded Postgres over skipping the DB.** Every measured number needs real
+  SQL; mocking it would have made them meaningless.
 - **Temporal, not random, train/test split.** Fit on history, score what comes
-  next. It is also the only split that keeps the causal author-reuse features
-  honest — a random split would put a cascade's own future neighbours in training.
-- **Organic bursts are not anomaly false positives.** Genuine virality is real
-  anomalous velocity; separating it from a campaign is the classifier's job. A
-  detector silent on it would starve the agent of its harder cases.
+  next — and it is the only split that keeps the causal author features honest.
+- **Cascade size is deliberately not a class signal.** Target size is drawn from
+  one distribution for both classes, so the model must learn timing, structure
+  and author reuse. A useless `size` feature is an honest result.
+- **Organic bursts are not anomaly false positives.** Genuine virality *is*
+  anomalous velocity; separating it from a campaign is the classifier's job.
 - **Failed investigations write nothing.** The old code wrote "uncertain at
-  confidence 0.0" and marked the anomaly investigated, asserting an unsupported
-  verdict and hiding the failure permanently.
+  confidence 0.0" and marked the anomaly investigated — asserting a verdict
+  nothing supported and hiding the failure permanently.
+- **Deferral kept but not wired in.** It ties confidence gating, and added
+  complexity has to buy something measurable.
 
 ---
 
-## Bugs found and fixed along the way
-
-Each of these was latent — none raised an error where it happened:
+## Bugs found and fixed — none of which raised an error where they lived
 
 1. `consumer.py` called `detector.evaluate(vscore, platform=)` against a
-   `(conn, score, platform)` signature. Anomaly detection had never run.
+   `(conn, score, platform)` signature. **Anomaly detection had never run.**
 2. `embed_unindexed_nodes` had no callers, so `trend_embeddings` stayed empty and
    `search_similar_trends` returned `[]` on every investigation.
-3. `store_embedding` used `ON CONFLICT` on columns with no matching unique index,
-   so every embedding write failed once the indexer actually ran.
-4. `NOTIFY` had no durable backing — anomalies raised while the agent was down were
-   lost permanently. The index for the sweep already existed, unused.
-5. `validate_e2e.py` and `seed.py` could not `import config` when run the way the
-   README documented, and seeded nodes with a type nothing reads.
+3. `store_embedding` used `ON CONFLICT` on columns with no unique index — every
+   embedding write failed once the indexer actually ran.
+4. `NOTIFY` had no durable backing; anomalies raised while the agent was down
+   were lost permanently. The index for the sweep already existed, unused.
+5. `validate_e2e.py` / `seed.py` couldn't `import config` when run as documented,
+   and seeded nodes with a type nothing reads.
 6. `validate_e2e.py` deleted `anomaly_events` before the `case_files` referencing
-   them — a foreign-key error that only appeared once the agent started succeeding.
+   them — a FK error that only appeared once the agent started succeeding.
 7. The Groq→Ollama fallback the README promised did not exist.
-8. asyncpg returns `timestamptz` as `datetime64[us]`, so `.astype("int64")/1e9` was
-   1 000× off. `peak_rate_per_min` was counting a 17-hour window. Tree splits are
-   scale-invariant, which is exactly why it went unnoticed.
-9. Cascade delays were measured from the earliest *child* rather than the seed
-   post, forcing the first root-attached child to zero — and root attachment is
-   what separates the two classes.
-10. Re-running the simulator with the same seed grafted two datasets together
+8. The Groq probe used `urllib`'s default User-Agent, which Cloudflare 403s
+   (error 1010) — it read a **valid** key as unusable, the exact failure it was
+   added to prevent.
+9. asyncpg returns `timestamptz` as `datetime64[us]`, so `.astype("int64")/1e9`
+   was 1000× off. `peak_rate_per_min` was counting a 17-hour window.
+10. Cascade delays were measured from the earliest *child* rather than the seed
+    post, forcing the first root-attached child to zero.
+11. Re-running the simulator with the same seed grafted two datasets together
     through shared node ids, inflating cascades past their target size.
+12. **The extractor emitted no `reshare` edges at all**, so live data produced no
+    cascades and the classifier could not be applied to it. The producer was
+    discarding `reply.parent` and never subscribed to reposts.
+13. Author reuse drifted 1.7 sd across the temporal split (see finding 1).
+14. A name collision between the windowed history counter and per-cascade author
+    frequency made every first-ever cascade look like it had a full history.
+15. English-only NER ran on multilingual firehose text, inventing entities that
+    then became the top "trending topics" the anomaly detector fired on.

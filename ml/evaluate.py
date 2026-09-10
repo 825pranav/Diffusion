@@ -61,6 +61,11 @@ THRESHOLD_GRID = np.round(np.arange(0.50, 0.96, 0.05), 2)
 N_RELIABILITY_BINS = 8
 
 DEFAULT_LLM_SAMPLE = 24
+# Repeats of each LLM arm. One pass over ~15 verdicts is far too noisy to compare
+# arms: across three single runs the hybrid arm spanned 0.36-0.83 ROC-AUC on an
+# unchanged configuration. Repeating and reporting the spread is the only honest
+# way to present it.
+DEFAULT_LLM_REPEATS = 3
 # Pause between investigations, to stay inside hosted rate limits.
 DEFAULT_LLM_DELAY = 1.5
 
@@ -280,20 +285,37 @@ def _write_report(
     failures: dict[str, int],
     n_holdout: int,
     subtype_table: str,
+    spreads: dict[str, list[dict[str, float]]],
+    llm_repeats: int,
 ) -> None:
     rows = []
     per_class_rows = []
     for name, m in results.items():
-        rows.append(
-            [
-                f"`{name}`",
-                m["n"],
-                f"{m['accuracy']:.3f}",
-                f"{m['macro_f1']:.3f}",
-                "n/a" if np.isnan(m["roc_auc"]) else f"{m['roc_auc']:.3f}",
-                f"{m['brier']:.3f}",
-            ]
-        )
+        repeat_metrics = spreads.get(name)
+        if repeat_metrics:
+            # Pooled point estimate is misleading on its own for a noisy arm, so
+            # show the mean across repeats and the range they spanned.
+            rows.append(
+                [
+                    f"`{name}`",
+                    f"{m['n']} ({len(repeat_metrics)}x)",
+                    _spread(repeat_metrics, "accuracy"),
+                    _spread(repeat_metrics, "macro_f1"),
+                    _spread(repeat_metrics, "roc_auc"),
+                    _spread(repeat_metrics, "brier"),
+                ]
+            )
+        else:
+            rows.append(
+                [
+                    f"`{name}`",
+                    m["n"],
+                    f"{m['accuracy']:.3f}",
+                    f"{m['macro_f1']:.3f}",
+                    "n/a" if np.isnan(m["roc_auc"]) else f"{m['roc_auc']:.3f}",
+                    f"{m['brier']:.3f}",
+                ]
+            )
         for cls in ("coordinated", "organic"):
             per_class_rows.append(
                 [
@@ -333,6 +355,17 @@ Investigations that returned no parseable verdict: {failure_note}. They are
 excluded rather than counted as wrong — each arm is measured on the answers it
 actually gives, and the count is reported so the omission stays visible.
 
+**The LLM arms are underpowered and should not be ranked against each other.**
+Each rests on fewer than twenty verdicts, and repeated runs move them further
+than the gap between them: across two runs of the same sample the `llm` arm
+scored ROC-AUC 0.602 and then 0.424, a swing of nearly 0.2 on an arm that never
+touches the classifier and so should not have changed at all. Sampling noise is
+larger than the effect. What the numbers do support is the coarse conclusion —
+a local 7B reasoning over graph structure is somewhere around chance at this
+task, and nowhere near the classifier's 0.938. Separating "LLM alone" from
+"LLM with the model tool" needs a stronger model and a sample in the hundreds,
+which is a rate-limit and runtime problem rather than a design one.
+
 ### By cascade subtype
 
 {subtype_table}
@@ -361,12 +394,58 @@ Reproduce with `python -m ml.evaluate`.
     upsert_section("Classifier vs LLM agent — held-out comparison", body)
 
 
+async def repeated_llm_arm(
+    holdout: pd.DataFrame,
+    sample_size: int,
+    include_model_tool: bool,
+    label: str,
+    repeats: int,
+    seed: int,
+    delay: float,
+) -> tuple[list[dict[str, float]], np.ndarray, np.ndarray, int]:
+    """
+    Run one arm several times over independently drawn samples.
+
+    Each repeat redraws the sample as well as re-querying the model, so the
+    reported spread covers both sources of variance rather than only the
+    model's. Returns per-repeat metrics plus the pooled verdicts, which are what
+    the reliability diagram is drawn from.
+    """
+    per_repeat: list[dict[str, float]] = []
+    all_y: list[np.ndarray] = []
+    all_p: list[np.ndarray] = []
+    failures = 0
+    for r in range(repeats):
+        sample = _stratified_sample(holdout, sample_size, seed + r)
+        y, p, failed = await run_llm_arm(sample, include_model_tool, f"{label} {r + 1}/{repeats}", delay)
+        failures += failed
+        if len(y) == 0:
+            continue
+        per_repeat.append(arm_metrics(y, p))
+        all_y.append(y)
+        all_p.append(p)
+    pooled_y = np.concatenate(all_y) if all_y else np.array([])
+    pooled_p = np.concatenate(all_p) if all_p else np.array([])
+    return per_repeat, pooled_y, pooled_p, failures
+
+
+def _spread(per_repeat: list[dict[str, float]], key: str) -> str:
+    """mean (min-max) across repeats, or a bare value when there is only one."""
+    values = [m[key] for m in per_repeat if not np.isnan(m[key])]
+    if not values:
+        return "n/a"
+    if len(values) == 1:
+        return f"{values[0]:.3f}"
+    return f"{np.mean(values):.3f} ({min(values):.3f}-{max(values):.3f})"
+
+
 async def main_async(
     labels_path: pathlib.Path,
     llm_sample: int,
     skip_llm: bool,
     seed: int,
     llm_delay: float = DEFAULT_LLM_DELAY,
+    llm_repeats: int = DEFAULT_LLM_REPEATS,
 ) -> None:
     model = load_model()
     if model is None:
@@ -382,14 +461,20 @@ async def main_async(
     arms_for_plot = {"classifier": (y_holdout, p_classifier)}
     failures: dict[str, int] = {}
 
+    spreads: dict[str, list[dict[str, float]]] = {}
     if not skip_llm:
-        sample = _stratified_sample(holdout, llm_sample, seed)
-        log.info("running LLM arms over %d sampled cascades (this is slow)", len(sample))
+        log.info(
+            "running LLM arms: %d repeats x %d cascades per arm (this is slow)",
+            llm_repeats, llm_sample,
+        )
         for name, include_model in (("llm", False), ("hybrid", True)):
-            y, p, failed = await run_llm_arm(sample, include_model, name, llm_delay)
+            per_repeat, y, p, failed = await repeated_llm_arm(
+                holdout, llm_sample, include_model, name, llm_repeats, seed, llm_delay
+            )
             failures[name] = failed
             if len(y):
                 results[name] = arm_metrics(y, p)
+                spreads[name] = per_repeat
                 arms_for_plot[name] = (y, p)
             else:
                 log.warning("[%s] produced no usable verdicts at all", name)
@@ -415,7 +500,7 @@ async def main_async(
 
     _write_report(
         results, threshold, gate_accuracy, coverage, failures, len(holdout),
-        subtype_breakdown(holdout, p_classifier),
+        subtype_breakdown(holdout, p_classifier), spreads, llm_repeats,
     )
     log.info("wrote results to docs/results.md")
 
@@ -428,6 +513,12 @@ def main() -> None:
         "--skip-llm", action="store_true", help="classifier arm only (fast)"
     )
     parser.add_argument(
+        "--llm-repeats",
+        type=int,
+        default=DEFAULT_LLM_REPEATS,
+        help="independent repeats of each LLM arm, reported as mean (min-max)",
+    )
+    parser.add_argument(
         "--llm-delay",
         type=float,
         default=DEFAULT_LLM_DELAY,
@@ -438,7 +529,10 @@ def main() -> None:
 
     configure_logging()
     asyncio.run(
-        main_async(args.labels, args.llm_sample, args.skip_llm, args.seed, args.llm_delay)
+        main_async(
+            args.labels, args.llm_sample, args.skip_llm, args.seed,
+            args.llm_delay, args.llm_repeats,
+        )
     )
 
 
