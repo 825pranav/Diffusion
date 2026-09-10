@@ -82,7 +82,13 @@ def _verdict_to_probability(classification: str, confidence: float) -> float:
 
 
 def arm_metrics(y_true: np.ndarray, p_coordinated: np.ndarray) -> dict[str, float]:
-    """Discrimination and calibration for one arm."""
+    """
+    Discrimination and calibration for one arm, reported per class.
+
+    Both classes are reported because they fail differently: an arm can look
+    strong on `coordinated` while quietly misclassifying most organic cascades,
+    and on a near-balanced holdout a single positive-class F1 hides that.
+    """
     pred = (p_coordinated >= 0.5).astype(int)
     metrics = {
         "n": int(len(y_true)),
@@ -91,7 +97,17 @@ def arm_metrics(y_true: np.ndarray, p_coordinated: np.ndarray) -> dict[str, floa
         "f1": f1_score(y_true, pred, zero_division=0),
         "brier": brier_score_loss(y_true, p_coordinated),
         "accuracy": float((pred == y_true).mean()),
+        "macro_f1": f1_score(y_true, pred, average="macro", zero_division=0),
     }
+    # Per class: label 1 = coordinated, label 0 = organic.
+    for name, label in (("coordinated", 1), ("organic", 0)):
+        metrics[f"precision_{name}"] = precision_score(
+            y_true, pred, pos_label=label, zero_division=0
+        )
+        metrics[f"recall_{name}"] = recall_score(
+            y_true, pred, pos_label=label, zero_division=0
+        )
+        metrics[f"f1_{name}"] = f1_score(y_true, pred, pos_label=label, zero_division=0)
     # A single-class sample makes ROC-AUC undefined rather than zero.
     metrics["roc_auc"] = (
         roc_auc_score(y_true, p_coordinated) if len(np.unique(y_true)) > 1 else float("nan")
@@ -230,6 +246,17 @@ def _stratified_sample(holdout: pd.DataFrame, n: int, seed: int) -> pd.DataFrame
     return pd.concat(parts).sample(frac=1.0, random_state=seed).reset_index(drop=True)
 
 
+def subtype_breakdown(holdout: pd.DataFrame, p_coordinated: np.ndarray) -> str:
+    """Classifier accuracy split by the simulator's plain and confusable subtypes."""
+    frame = holdout[["subtype", "y"]].copy()
+    frame["correct"] = ((p_coordinated >= 0.5).astype(int) == frame["y"]).astype(float)
+    rows = [
+        [f"`{subtype}`", int(len(g)), f"{g['correct'].mean():.3f}"]
+        for subtype, g in frame.groupby("subtype", sort=True)
+    ]
+    return markdown_table(["subtype", "n", "accuracy"], rows)
+
+
 def _write_report(
     results: dict[str, dict[str, float]],
     threshold: float,
@@ -237,30 +264,52 @@ def _write_report(
     coverage: float,
     failures: dict[str, int],
     n_holdout: int,
+    subtype_table: str,
 ) -> None:
     rows = []
+    per_class_rows = []
     for name, m in results.items():
         rows.append(
             [
                 f"`{name}`",
                 m["n"],
-                f"{m['precision']:.3f}",
-                f"{m['recall']:.3f}",
-                f"{m['f1']:.3f}",
+                f"{m['accuracy']:.3f}",
+                f"{m['macro_f1']:.3f}",
                 "n/a" if np.isnan(m["roc_auc"]) else f"{m['roc_auc']:.3f}",
                 f"{m['brier']:.3f}",
             ]
         )
+        for cls in ("coordinated", "organic"):
+            per_class_rows.append(
+                [
+                    f"`{name}`",
+                    cls,
+                    f"{m[f'precision_{cls}']:.3f}",
+                    f"{m[f'recall_{cls}']:.3f}",
+                    f"{m[f'f1_{cls}']:.3f}",
+                ]
+            )
 
     failure_note = ", ".join(f"`{k}` {v}" for k, v in failures.items() if v) or "none"
 
     body = f"""
 All arms scored on the same temporally held-out split ({n_holdout} cascades;
-the LLM arms are sampled from it, `n` below). Positive class = `coordinated`.
+the LLM arms are sampled from it, `n` below).
 
 {markdown_table(
-    ["arm", "n", "precision", "recall", "F1", "ROC-AUC", "Brier"],
+    ["arm", "n", "accuracy", "macro F1", "ROC-AUC", "Brier"],
     rows,
+)}
+
+### Per class
+
+Reported both ways because the arms fail differently — an arm can look strong on
+`coordinated` while misclassifying most organic cascades, which a single
+positive-class F1 hides.
+
+{markdown_table(
+    ["arm", "class", "precision", "recall", "F1"],
+    per_class_rows,
 )}
 
 ![reliability diagram](reliability.png)
@@ -268,6 +317,16 @@ the LLM arms are sampled from it, `n` below). Positive class = `coordinated`.
 Investigations that returned no parseable verdict: {failure_note}. They are
 excluded rather than counted as wrong — each arm is measured on the answers it
 actually gives, and the count is reported so the omission stays visible.
+
+### By cascade subtype
+
+{subtype_table}
+
+The simulator generates a fraction of each class as a confusable subtype:
+`viral_organic` cascades that burst like a campaign, and `stealth_coordinated`
+ones that pace themselves and rotate accounts. They should be measurably harder
+than the plain cases, and are — which is the evidence that the overlap built into
+the generator is doing real work rather than decorating the dataset.
 
 ### Human-review gate
 
@@ -335,7 +394,10 @@ async def main_async(
             m["brier"],
         )
 
-    _write_report(results, threshold, gate_accuracy, coverage, failures, len(holdout))
+    _write_report(
+        results, threshold, gate_accuracy, coverage, failures, len(holdout),
+        subtype_breakdown(holdout, p_classifier),
+    )
     log.info("wrote results to docs/results.md")
 
 
