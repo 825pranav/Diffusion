@@ -47,9 +47,15 @@ class VelocityScorer:
         self._evict(bucket, now)
         return self._make_score(entity_id, bucket)
 
-    def score(self, entity_id: str) -> VelocityScore:
-        """Return the current velocity for entity_id without recording a new event."""
-        now = time.time()
+    def score(self, entity_id: str, ts: float | None = None) -> VelocityScore:
+        """
+        Return the current velocity for entity_id without recording a new event.
+
+        `ts` overrides the current time, which is what makes replaying a
+        historical event stream possible — with wall-clock time the whole window
+        would be expired before the first sample was read.
+        """
+        now = ts if ts is not None else time.time()
         bucket = self._buckets[entity_id]
         self._evict(bucket, now)
         return self._make_score(entity_id, bucket)

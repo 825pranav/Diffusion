@@ -30,11 +30,14 @@ import numpy as np
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from config import DB_URL, configure_logging  # noqa: E402
+from simulation.background import DEFAULT_RATE_PER_DAY, generate_background  # noqa: E402
 from simulation.cascade import (  # noqa: E402
     DEFAULT_DIFFICULTY,
     DIFFICULTIES,
     Cascade,
     CascadeSimulator,
+    SimEdge,
+    SimNode,
 )
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -71,7 +74,12 @@ def _batched(items: list, size: int) -> Iterable[list]:
         yield items[start : start + size]
 
 
-async def _load_cascades(conn: asyncpg.Connection, cascades: list[Cascade]) -> tuple[int, int]:
+async def _load_cascades(
+    conn: asyncpg.Connection,
+    cascades: list[Cascade],
+    extra_nodes: list[SimNode] | None = None,
+    extra_edges: list[SimEdge] | None = None,
+) -> tuple[int, int]:
     """
     Bulk-load every node and edge.
 
@@ -104,6 +112,16 @@ async def _load_cascades(conn: asyncpg.Connection, cascades: list[Cascade]) -> t
                     edge.weight,
                 )
             )
+
+    for node in extra_nodes or []:
+        node_rows[(node.id, node.platform)] = (
+            node.id, node.type, node.platform, node.label, json.dumps(node.metadata),
+        )
+    for edge in extra_edges or []:
+        edge_rows.append(
+            (edge.source_id, edge.target_id, edge.edge_type,
+             edge.platform, edge.ts, edge.weight)
+        )
 
     await conn.execute("ALTER TABLE graph_edges DISABLE TRIGGER trg_graph_delta")
     try:
@@ -193,6 +211,7 @@ async def run(
     seed: int,
     truncate: bool,
     out_path: pathlib.Path,
+    background_rate: float = DEFAULT_RATE_PER_DAY,
 ) -> None:
     rng = np.random.default_rng(seed)
     run_id = f"{difficulty[0]}{seed}"
@@ -219,7 +238,24 @@ async def run(
             # old ones, silently grafting two datasets into one and inflating
             # every cascade past its target size.
             await _delete_matching(conn, f"sim:{run_id}:%")
-        n_nodes, n_edges = await _load_cascades(conn, cascades)
+        bg_nodes: list[SimNode] = []
+        bg_edges: list[SimEdge] = []
+        if background_rate > 0:
+            topic_ids = sorted({c.topic_id for c in cascades})
+            bg_nodes, bg_edges = generate_background(
+                rng=rng,
+                run_id=run_id,
+                topic_ids=topic_ids,
+                window_days=sim.window_days,
+                end_time=max(c.t0 for c in cascades),
+                rate_per_day=background_rate,
+            )
+            log.info(
+                "generated %d background mentions across %d topics",
+                len(bg_edges), len(topic_ids),
+            )
+
+        n_nodes, n_edges = await _load_cascades(conn, cascades, bg_nodes, bg_edges)
         log.info("loaded %d unique nodes and %d edges", n_nodes, n_edges)
     finally:
         await conn.close()
@@ -242,10 +278,25 @@ def main() -> None:
         "--truncate", action="store_true", help="delete previous sim:% rows first"
     )
     parser.add_argument("--out", type=pathlib.Path, default=DEFAULT_OUT)
+    parser.add_argument(
+        "--background-rate",
+        type=float,
+        default=DEFAULT_RATE_PER_DAY,
+        help=(
+            "background mentions per topic per day (0 disables). Without it every "
+            "event belongs to a cascade and the anomaly detector's false-positive "
+            "rate is zero by construction."
+        ),
+    )
     args = parser.parse_args()
 
     configure_logging()
-    asyncio.run(run(args.n, args.difficulty, args.seed, args.truncate, args.out))
+    asyncio.run(
+        run(
+            args.n, args.difficulty, args.seed, args.truncate,
+            args.out, args.background_rate,
+        )
+    )
 
 
 if __name__ == "__main__":

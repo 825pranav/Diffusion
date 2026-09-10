@@ -150,6 +150,18 @@ async def fetch_frames(conn, root_ids: list[str]) -> tuple[pd.DataFrame, pd.Data
     return tree, authors
 
 
+def to_epoch_seconds(values: pd.Series) -> np.ndarray:
+    """
+    Convert a datetime column to epoch seconds.
+
+    asyncpg hands back timestamptz as datetime64[**us**], so the obvious
+    `.astype("int64") / 1e9` is a thousand times too small and silently rescales
+    every duration. Normalising the unit first makes the conversion independent
+    of whatever resolution the driver chose.
+    """
+    return pd.to_datetime(values, utc=True).dt.as_unit("ns").astype("int64").to_numpy() / 1e9
+
+
 def _peak_rate_per_min(sorted_epochs: np.ndarray) -> float:
     """Largest number of posts falling inside any PEAK_WINDOW_SECONDS window."""
     if sorted_epochs.size == 0:
@@ -179,7 +191,7 @@ def _structure_and_timing(group: pd.DataFrame, root_id: str) -> dict[str, float]
     children = group["source_id"].value_counts()
     root_fanout = float(children.get(root_id, 0))
 
-    epochs = np.sort(group["ts"].astype("int64").to_numpy() / 1e9)
+    epochs = np.sort(to_epoch_seconds(group["ts"]))
     t0 = float(root_ts.timestamp())
     duration = float(epochs.max() - t0) if epochs.size else 0.0
     half_idx = max(int(np.ceil(epochs.size / 2)) - 1, 0)

@@ -12,27 +12,49 @@ cascades are held out for `ml/evaluate.py` and never seen here.
 
 | metric | mean | std | min | max |
 |---|---|---|---|---|
-| precision | 0.869 | 0.028 | 0.827 | 0.896 |
-| recall | 0.848 | 0.047 | 0.778 | 0.901 |
-| f1 | 0.858 | 0.035 | 0.816 | 0.898 |
-| roc_auc | 0.931 | 0.027 | 0.897 | 0.963 |
-| pr_auc | 0.946 | 0.020 | 0.918 | 0.967 |
+| precision | 0.872 | 0.019 | 0.846 | 0.891 |
+| recall | 0.846 | 0.037 | 0.784 | 0.883 |
+| f1 | 0.859 | 0.026 | 0.819 | 0.883 |
+| roc_auc | 0.924 | 0.028 | 0.892 | 0.957 |
+| pr_auc | 0.938 | 0.021 | 0.912 | 0.960 |
 
 ### Feature importance (gain)
 
 | feature | gain | share |
 |---|---|---|
-| delay_median_s | 3,401 | 17.0% |
-| prior_author_mean | 3,281 | 16.4% |
-| cross_platform_edge_frac | 1,701 | 8.5% |
-| duration_s | 1,620 | 8.1% |
-| leaf_frac | 1,602 | 8.0% |
-| mean_children | 1,379 | 6.9% |
-| first_hop_lag_s | 1,142 | 5.7% |
-| root_fanout_share | 1,059 | 5.3% |
-| delay_mean_s | 748 | 3.7% |
-| delay_cv | 658 | 3.3% |
-| delay_std_s | 564 | 2.8% |
-| prior_author_max | 464 | 2.3% |
+| time_to_half_s | 2,907 | 14.5% |
+| prior_author_mean | 2,875 | 14.3% |
+| cross_platform_edge_frac | 2,143 | 10.7% |
+| delay_median_s | 1,562 | 7.8% |
+| mean_children | 1,373 | 6.8% |
+| prior_author_max | 1,205 | 6.0% |
+| leaf_frac | 1,193 | 5.9% |
+| first_hop_lag_s | 1,104 | 5.5% |
+| root_fanout_share | 805 | 4.0% |
+| delay_cv | 619 | 3.1% |
+| duration_s | 600 | 3.0% |
+| delay_mean_s | 495 | 2.5% |
 
 Reproduce with `python -m ml.train`.
+
+## Anomaly baselines — replay comparison
+
+
+Every topic's mention stream replayed through the production `VelocityScorer`
+and `AnomalyDetector` at a 300s tick (40 topics). A detection is
+*explained* if a cascade began on that topic within
+60 minutes before it; unexplained detections
+fired on baseline noise and are the false positives.
+
+Organic bursts are not counted as false positives. Genuine virality is real
+anomalous velocity — separating it from a campaign is the classifier's job, and
+a detector that stayed silent for it would starve the agent of the harder half
+of its cases.
+
+| baseline | detections | coord. recall | organic recall | FP rate | FP / topic-day | median delay (min) |
+|---|---|---|---|---|---|---|
+| `zscore` | 1,173 | 0.834 | 0.784 | 0.522 | 5.06 | 3.3 |
+| `robust` | 863 | 0.761 | 0.708 | 0.202 | 1.44 | 3.4 |
+| `ewma` | 1,225 | 0.888 | 0.854 | 0.660 | 6.69 | 3.2 |
+
+Reproduce with `python -m ml.eval_anomaly`.

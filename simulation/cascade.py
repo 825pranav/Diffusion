@@ -132,7 +132,7 @@ class CascadeSimulator:
         n_bots: int = 400,
         n_humans: int = 4000,
         n_topics: int = 200,
-        window_days: int = 30,
+        window_days: int = 3,
     ) -> None:
         if difficulty not in DIFFICULTIES:
             raise ValueError(
