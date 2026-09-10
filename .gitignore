@@ -72,3 +72,5 @@ yarn-error.log*
 # Local session context (do not commit)
 context.txt
 frontend_prompt.md
+# Local embedded dev database (pgserver)
+.pgdata/
