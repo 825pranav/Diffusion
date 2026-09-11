@@ -102,6 +102,8 @@ the LLM arms are sampled from it, `n` below).
 | arm | n | accuracy | macro F1 | ROC-AUC | Brier |
 |---|---|---|---|---|---|
 | `classifier` | 400 | 0.890 | 0.889 | 0.938 | 0.086 |
+| `llm` | 15 | 0.667 | 0.603 | 0.571 | 0.237 |
+| `hybrid` | 16 | 0.438 | 0.435 | 0.359 | 0.345 |
 
 ### Per class
 
@@ -113,12 +115,27 @@ positive-class F1 hides.
 |---|---|---|---|---|
 | `classifier` | coordinated | 0.906 | 0.859 | 0.882 |
 | `classifier` | organic | 0.877 | 0.919 | 0.897 |
+| `llm` | coordinated | 0.615 | 1.000 | 0.762 |
+| `llm` | organic | 1.000 | 0.286 | 0.444 |
+| `hybrid` | coordinated | 0.429 | 0.375 | 0.400 |
+| `hybrid` | organic | 0.444 | 0.500 | 0.471 |
 
 ![reliability diagram](reliability.png)
 
-Investigations that returned no parseable verdict: none. They are
+Investigations that returned no parseable verdict: `llm` 5, `hybrid` 4. They are
 excluded rather than counted as wrong — each arm is measured on the answers it
 actually gives, and the count is reported so the omission stays visible.
+
+**The LLM arms are underpowered and should not be ranked against each other.**
+Each rests on fewer than twenty verdicts, and repeated runs move them further
+than the gap between them: across two runs of the same sample the `llm` arm
+scored ROC-AUC 0.602 and then 0.424, a swing of nearly 0.2 on an arm that never
+touches the classifier and so should not have changed at all. Sampling noise is
+larger than the effect. What the numbers do support is the coarse conclusion —
+a local 7B reasoning over graph structure is somewhere around chance at this
+task, and nowhere near the classifier's 0.938. Separating "LLM alone" from
+"LLM with the model tool" needs a stronger model and a sample in the hundreds,
+which is a rate-limit and runtime problem rather than a design one.
 
 ### By cascade subtype
 

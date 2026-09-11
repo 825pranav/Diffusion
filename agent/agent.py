@@ -50,7 +50,11 @@ SWEEP_INTERVAL_SECONDS = int(os.getenv("AGENT_SWEEP_INTERVAL", "60"))
 SWEEP_BATCH_SIZE = int(os.getenv("AGENT_SWEEP_BATCH", "50"))
 
 GROQ_API_BASE = "https://api.groq.com/openai/v1"
+# llama-3.3-70b-versatile, the previous default, has been decommissioned.
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 GROQ_PROBE_TIMEOUT = 10  # seconds to decide whether Groq is usable
+# Cloudflare fronts the Groq API and 403s urllib's default agent (error 1010).
+GROQ_USER_AGENT = "diffusion-agent/0.1 (+https://github.com/825pranav/diffusion)"
 
 # Inference backend, resolved once on first use.
 _llm: LLM | None = None
@@ -84,7 +88,17 @@ def _groq_model_available(api_key: str, model: str) -> bool:
     ready the whole time.
     """
     request = urllib.request.Request(
-        f"{GROQ_API_BASE}/models", headers={"Authorization": f"Bearer {api_key}"}
+        f"{GROQ_API_BASE}/models",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            # Groq sits behind Cloudflare, which rejects urllib's default
+            # "Python-urllib/x.y" agent with a 403 and Cloudflare error 1010.
+            # Without this the probe reads a perfectly valid key as unusable and
+            # silently downgrades to the local model — the exact failure it
+            # exists to prevent.
+            "User-Agent": GROQ_USER_AGENT,
+        },
     )
     try:
         with urllib.request.urlopen(request, timeout=GROQ_PROBE_TIMEOUT) as response:
@@ -116,7 +130,7 @@ def _build_llm() -> LLM:
         return _llm
 
     groq_key = os.getenv("GROQ_API_KEY", "")
-    groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    groq_model = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL)
     if groq_key and _groq_model_available(groq_key, groq_model):
         from llama_index.llms.groq import Groq
 

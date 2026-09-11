@@ -55,6 +55,7 @@ Full tables in [`docs/results.md`](docs/results.md), all script-generated.
 | Learned deferral | 0.958 vs 0.957 for confidence — **no gain** |
 | Live capture | **103,544 reshare edges**, 262,349 real nodes from Bluesky + HN |
 | Live cascades | 3,000 observed, 980 with 3+ posts, max size 126, max depth 13 |
+| Backlog sweep | verified on real data — recovered 50 anomalies (batch limit) that `NOTIFY` had dropped |
 
 ---
 
@@ -95,7 +96,17 @@ mean with the observed range, so the table cannot imply precision it does not
 have. Getting a real comparison needs a stronger model and a sample in the
 hundreds — a rate-limit and runtime problem, not a design one.
 
-**4. Running on real traffic found a bug simulation never could.**
+**4. The durability fix was validated against real traffic, not just tests.**
+278 anomalies fired during the live capture while the agent was deliberately
+stopped. Postgres `NOTIFY` drops notifications with no listener, so under the
+original code every one would have been lost. On restart:
+
+    backlog sweep recovered 50 uninvestigated anomalies
+    investigating anomaly 6 - node=entity:org:utc platform=bluesky z=3.37
+
+50 is `AGENT_SWEEP_BATCH`; the rest drain on subsequent ticks.
+
+**5. Running on real traffic found a bug simulation never could.**
 The anomaly detector's loudest "trending topics" were a Hindi phrase and a lone
 Japanese bracket, firing repeatedly. `en_core_web_sm` is English-only and the
 firehose is multilingual; given other languages it does not decline, it invents
@@ -143,6 +154,12 @@ on an embedded database rather than the compose stack.
       shallower than simulated ones (`max_depth` p50 1 vs 4), because a firehose
       shows replies-to-posts far more often than replies-to-replies. The model
       still returns confident numbers on inputs it was never trained on.
+- [ ] **Re-run the LLM arms with `--llm-repeats`.** The machinery is committed
+      but the run was killed by the OS memory guard — `llama-server` holds 6.2 GB
+      and a browser was holding ~4 GB more. `docs/results.md` currently shows a
+      single run per arm, whose numbers should be read with the variance caveat
+      in that section. Close a few apps and run
+      `python -m ml.evaluate --llm-sample 12 --llm-repeats 3`.
 - [ ] **Anomalies re-fire on the same entity.** A sustained elevated topic
       triggers repeatedly with no per-entity cooldown, so one trend can occupy
       the agent many times over. 278 anomalies fired during a 25-minute capture,
