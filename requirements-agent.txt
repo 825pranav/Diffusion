@@ -1,0 +1,18 @@
+# Agent — installed in a separate pip pass from requirements.txt.
+#
+# llama-index-core 0.10.x declares numpy<2.0.0. The rest of the stack (scipy,
+# lightgbm, pandas) needs numpy>=2. Both constraints in one resolution pass is
+# unsatisfiable and pip fails with ResolutionImpossible, so the two files are
+# installed separately and numpy is restored afterwards. The agent runs
+# correctly on numpy 2 despite the declared pin.
+#
+# Held at 0.10.x deliberately: ReActAgent.from_tools, which agent/agent.py is
+# built on, is gone by 0.13 — 0.12 is the last line that still has it, and its
+# Groq/Ollama adapters are no longer published for that core version.
+#
+#   pip install -r requirements-agent.txt
+#   pip install -r requirements.txt
+#
+llama-index-core==0.10.52
+llama-index-llms-groq==0.1.4
+llama-index-llms-ollama==0.2.2

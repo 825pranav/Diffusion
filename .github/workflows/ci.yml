@@ -17,12 +17,15 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        # llama-index-core 0.10.52 declares numpy<2 but runs correctly on the
-        # numpy 2 that scipy and lightgbm require. Installing it last and then
-        # restoring numpy keeps the working combination; the resolver warning is
-        # expected. See PROGRESS.md.
+        # Two passes on purpose. llama-index-core 0.10.x declares numpy<2 while
+        # scipy/lightgbm/pandas need numpy>=2; resolving both in one pass is
+        # impossible and pip exits non-zero. Installed separately, the agent
+        # goes in first and the main pin set then restores numpy, which the
+        # agent runs on correctly despite its declared bound. pip warns about
+        # the unsatisfied pin here and that warning is expected.
         run: |
           python -m pip install --upgrade pip
+          pip install -r requirements-agent.txt
           pip install -r requirements.txt
           pip install "numpy>=2.1,<2.8"
           python -m spacy download en_core_web_sm

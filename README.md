@@ -251,7 +251,10 @@ git clone https://github.com/825pranav/diffusion
 cd diffusion
 
 python -m venv .venv
-.venv/bin/pip install -r requirements.txt          # .venv/Scripts/pip on Windows
+# Two passes: the agent's llama-index pins declare numpy<2 while the rest of
+# the stack needs numpy>=2, so they cannot be resolved together.
+.venv/bin/pip install -r requirements-agent.txt   # .venv/Scripts/pip on Windows
+.venv/bin/pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 ```
 
