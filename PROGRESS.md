@@ -36,6 +36,7 @@ database still holds the simulated dataset *and* the live capture.
 | 5 | Retrieval correctness | ✅ partial HNSW index, recall measured |
 | 6 | Tests + CI | ✅ 95 tests, ruff clean, GitHub Actions |
 | — | Live ingestion | ✅ real Bluesky + HN, cascades characterised |
+| — | Propagation capture | ✅ HN comment threads and Mastodon replies, parents backfilled |
 | — | Learned deferral | ✅ built, **negative result**, not wired in |
 
 ---
@@ -150,10 +151,14 @@ on an embedded database rather than the compose stack.
       `openai/gpt-oss-120b` answers in ~1.6 s, but one investigation is 4–8 rapid
       calls and the free tier 429s throughout a 40-cascade run. `--llm-delay`
       exists; a paid tier or a smaller Groq model would fix it properly.
-- [ ] **Live classifier scores are out of domain.** Observed cascades are far
+- [~] **Live classifier scores are out of domain.** Observed cascades were far
       shallower than simulated ones (`max_depth` p50 1 vs 4), because a firehose
-      shows replies-to-posts far more often than replies-to-replies. The model
-      still returns confident numbers on inputs it was never trained on.
+      shows replies-to-posts far more often than replies-to-replies.
+      `ingestion/bluesky_backfill.py` now resolves the missing parents through
+      the public API — no auth needed — and climbs the reply chain. Measured on
+      25 live replies: median depth 2, mean 2.8, max 7, with 32% reaching depth
+      3 or more, against a flat 1 before. Not yet at the simulator's p50 of 4,
+      so the domain gap is narrowed rather than closed.
 - [ ] **Re-run the LLM arms with `--llm-repeats`.** The machinery is committed
       but the run was killed by the OS memory guard — `llama-server` holds 6.2 GB
       and a browser was holding ~4 GB more. `docs/results.md` currently shows a
@@ -169,11 +174,12 @@ on an embedded database rather than the compose stack.
 
 ## What I would do next, ranked
 
-1. **Backfill cascade parents through the Bluesky API.** The single highest-value
-   change. Right now a reply whose parent never floated past becomes a two-node
-   tree, which is why real cascades look flat and why classifier scores on live
-   data are out of domain. Fetching parents on demand reconstructs whole threads
-   and makes the live numbers trustworthy.
+1. **Re-measure the live cascade distribution now that parents backfill.**
+   `bluesky_backfill.py` reconstructs threads (median depth 2, max 7 on a
+   25-reply sample), so `ml/analyze_real.py` should be re-run against a fresh
+   capture to see how far the live distribution has moved toward the
+   simulator's. That comparison is what decides whether live scores can be
+   trusted, and it now has real thread structure to work with.
 2. **New features for `stealth_coordinated`.** Account age, posting-schedule
    regularity, or coordination structure *across* cascades rather than within
    one. This is the documented ceiling — no gating or model change touches it.
