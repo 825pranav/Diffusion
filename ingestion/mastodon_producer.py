@@ -35,15 +35,32 @@ def _strip_html(html: str) -> str:
 
 
 def _serialize(status: dict) -> dict:
+    """
+    Flatten one status, keeping whatever it propagated from.
+
+    Mastodon exposes two propagation signals and both were being dropped:
+    `in_reply_to_id` for replies, and `reblog` — the original status embedded
+    whole — for boosts. Without them Mastodon contributes authorship and
+    hashtags but no cascade structure, exactly as HN did.
+
+    A boost carries no text of its own, so its language tag is taken from the
+    status it boosts.
+    """
     account = status.get("account", {})
     tags = [t["name"] for t in status.get("tags", [])]
+    reblog = status.get("reblog") or {}
+    # A boost propagates the embedded original; a reply propagates its parent.
+    parent_id = reblog.get("id") or status.get("in_reply_to_id")
+
     return {
         "id": status["id"],
-        "type": "status",
+        "type": "boost" if reblog else "status",
         "platform": "mastodon",
         "text": _strip_html(status.get("content", "")),
         "author": account.get("acct"),
         "tags": tags,
+        "parent_id": str(parent_id) if parent_id else None,
+        "langs": [status.get("language") or reblog.get("language") or ""],
         "reblogs": status.get("reblogs_count", 0),
         "favourites": status.get("favourites_count", 0),
         "url": status.get("url"),

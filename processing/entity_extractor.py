@@ -206,6 +206,26 @@ def _extract_mastodon(record: dict) -> EntitySet:
         },
     ))
 
+    # Replies name their parent; boosts name the status they carry. Both are
+    # propagation, and both become the same reshare edge.
+    parent_id = record.get("parent_id")
+    if parent_id:
+        parent_content_id = f"{MASTODON_CONTENT_PREFIX}{parent_id}"
+        es.nodes.append(Node(
+            id=parent_content_id,
+            type="content",
+            platform="mastodon",
+            label="",
+            metadata={"placeholder": True},
+        ))
+        es.edges.append(Edge(
+            source_id=parent_content_id,
+            target_id=content_id,
+            edge_type="reshare",
+            platform="mastodon",
+            timestamp=ts,
+        ))
+
     author = record.get("author")
     if author:
         author_id = f"{MASTODON_USER_PREFIX}{author}"
@@ -252,8 +272,33 @@ def _extract_hn(record: dict) -> EntitySet:
             "descendants": record.get("descendants", 0),
             "url": record.get("url"),
             "created_utc": record.get("created_utc"),
+            "hn_type": record.get("type", "story"),
         },
     ))
+
+    # A comment's parent is the story or comment it replies to. HN threads are
+    # the deepest propagation structure available to this pipeline — far deeper
+    # than a sampled Bluesky firehose shows, because the whole tree is
+    # retrievable rather than glimpsed in passing.
+    parent_id = record.get("parent_id")
+    if parent_id:
+        parent_content_id = f"{HN_CONTENT_PREFIX}{parent_id}"
+        # Same placeholder rule as Bluesky: keep the edge from dangling, and let
+        # upsert_node refuse to overwrite the real node if it arrives later.
+        es.nodes.append(Node(
+            id=parent_content_id,
+            type="content",
+            platform="hn",
+            label="",
+            metadata={"placeholder": True},
+        ))
+        es.edges.append(Edge(
+            source_id=parent_content_id,
+            target_id=content_id,
+            edge_type="reshare",
+            platform="hn",
+            timestamp=ts,
+        ))
 
     author = record.get("by")
     if author:
