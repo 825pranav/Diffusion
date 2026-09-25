@@ -5,7 +5,7 @@ Maintains a per-entity rolling history of velocity scores. When a new
 sample scores above the threshold, an AnomalyEvent is emitted via Postgres
 LISTEN/NOTIFY — this is how the agent process wakes without polling.
 
-Three baselines are available via ANOMALY_BASELINE:
+Six baselines are available via ANOMALY_BASELINE:
 
   zscore  mean and standard deviation. Both are dragged upward by the very
           spikes being looked for, so a sustained campaign hides itself.
@@ -14,6 +14,19 @@ Three baselines are available via ANOMALY_BASELINE:
           velocity is spiky by nature.
   ewma    exponentially weighted mean and variance. Tracks drift, so a topic
           that is genuinely busier this week stops firing continuously.
+  poisson the window's event *count* against a Poisson with a trimmed-mean
+          rate. Velocity on a quiet topic is a small integer count, where the
+          MAD is usually exactly zero and `robust` abstains; a count model
+          stays defined there. The tail probability is reported as the
+          equivalent one-sided normal z, so thresholds mean the same thing.
+  negbin  as `poisson`, but with a negative binomial whose variance is read
+          from the history. Real chatter clumps (a reply draws replies), so
+          counts are overdispersed and a pure Poisson baseline overstates how
+          surprising an ordinary clump is.
+  cusum   one-sided CUSUM over the Poisson z-scores. Accumulates modest,
+          sustained excess instead of waiting for a single large sample, and
+          resets after firing so one burst raises one alert rather than one
+          per tick.
 
 ml/eval_anomaly.py measures all three on replayed simulator traffic.
 
@@ -30,6 +43,7 @@ import os
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from statistics import NormalDist
 
 import asyncpg
 
@@ -50,10 +64,77 @@ EWMA_ALPHA = float(os.getenv("ANOMALY_EWMA_ALPHA", "0.1"))
 # plain z-score threshold.
 MAD_TO_SIGMA = 1.4826
 
+# Share of the highest history samples dropped before estimating the Poisson
+# rate — past bursts must not inflate the baseline they are compared against.
+POISSON_TRIM = float(os.getenv("ANOMALY_POISSON_TRIM", "0.2"))
+# CUSUM reference value: per-sample excess (in z units) that is absorbed as
+# noise before anything accumulates.
+CUSUM_K = float(os.getenv("ANOMALY_CUSUM_K", "0.5"))
+
+_NORMAL = NormalDist()
+
 log = logging.getLogger(__name__)
 
 
-_BASELINES = ("zscore", "robust", "ewma")
+_BASELINES = ("zscore", "robust", "ewma", "poisson", "negbin", "cusum")
+
+
+def poisson_upper_tail(count: int, rate: float) -> float:
+    """P(X >= count) for X ~ Poisson(rate), summed directly in log space.
+
+    Computing 1 - CDF instead loses every digit exactly where it matters: a
+    burst far above a quiet baseline has a tail probability below machine
+    epsilon, which 1 - CDF rounds to zero.
+    """
+    if count <= 0:
+        return 1.0
+    log_rate = math.log(rate)
+    terms = []
+    i = count
+    while True:
+        term = -rate + i * log_rate - math.lgamma(i + 1)
+        terms.append(term)
+        # Past the mode the terms shrink geometrically; stop once negligible.
+        if i > rate and term < terms[0] - 40:
+            break
+        i += 1
+    peak = max(terms)
+    return min(1.0, math.exp(peak) * sum(math.exp(t - peak) for t in terms))
+
+
+def negbin_upper_tail(count: int, mean: float, variance: float) -> float:
+    """
+    P(X >= count) for a negative binomial with the given mean and variance.
+
+    Falls back to Poisson when the variance does not exceed the mean — the
+    negative binomial cannot be underdispersed.
+    """
+    if variance <= mean * (1.0 + 1e-9):
+        return poisson_upper_tail(count, mean)
+    if count <= 0:
+        return 1.0
+    r = mean * mean / (variance - mean)          # "number of successes"
+    q = mean / (r + mean)                        # per-trial failure probability
+    log_q, log_1q = math.log(q), math.log1p(-q)
+    base = r * log_1q - math.lgamma(r)
+    terms = []
+    i = count
+    while True:
+        term = base + math.lgamma(i + r) - math.lgamma(i + 1) + i * log_q
+        terms.append(term)
+        if i > mean and term < terms[0] - 40:
+            break
+        i += 1
+        if i - count > 100_000:  # pathological tail; the sum has long converged
+            break
+    peak = max(terms)
+    return min(1.0, math.exp(peak) * sum(math.exp(t - peak) for t in terms))
+
+
+def tail_to_z(p: float) -> float:
+    """The one-sided normal z with the same upper-tail probability."""
+    p = min(max(p, 1e-300), 1.0 - 1e-16)
+    return -_NORMAL.inv_cdf(p)
 
 
 def _median(ordered: list[float]) -> float:
@@ -111,6 +192,11 @@ class AnomalyDetector:
         )
         # EWMA carries (mean, variance) per entity rather than a window.
         self._ewma: dict[str, tuple[float, float]] = {}
+        # Poisson and CUSUM work on raw window counts, not velocities.
+        self._counts: dict[str, deque[int]] = defaultdict(
+            lambda: deque(maxlen=history_size)
+        )
+        self._cusum: dict[str, float] = defaultdict(float)
 
     async def _notify(self, conn: asyncpg.Connection, event: AnomalyEvent) -> None:
         try:
@@ -190,8 +276,45 @@ class AnomalyDetector:
         new_var = (1 - EWMA_ALPHA) * (var + EWMA_ALPHA * delta * delta)
         self._ewma[entity_id] = (new_mean, new_var)
 
+    def _score_poisson(
+        self, counts: deque[int], count: int
+    ) -> tuple[float, float, float]:
+        """
+        Tail probability of the current count under a Poisson baseline.
+
+        The rate is a trimmed mean of past counts, with half an event of prior
+        mass so an all-zero history gives a small positive rate instead of an
+        infinitely surprising first event.
+        """
+        ordered = sorted(counts)
+        keep = ordered[: max(1, math.ceil(len(ordered) * (1.0 - POISSON_TRIM)))]
+        rate = (sum(keep) + 0.5) / (len(keep) + 1.0)
+        z = tail_to_z(poisson_upper_tail(count, rate))
+        return z, rate, math.sqrt(rate)
+
+    def _score_negbin(
+        self, counts: deque[int], count: int
+    ) -> tuple[float, float, float]:
+        """
+        Tail probability under a negative binomial fitted to the history.
+
+        The mean is the same trimmed mean the Poisson baseline uses. The
+        variance comes from the history winsorised at its 90th percentile, so
+        clumpy chatter widens the baseline while a single past burst cannot
+        blow it open.
+        """
+        ordered = sorted(counts)
+        keep = ordered[: max(1, math.ceil(len(ordered) * (1.0 - POISSON_TRIM)))]
+        mean = (sum(keep) + 0.5) / (len(keep) + 1.0)
+        cap = ordered[min(len(ordered) - 1, int(0.9 * len(ordered)))]
+        clipped = [min(c, cap) for c in ordered]
+        m = sum(clipped) / len(clipped)
+        variance = max(sum((c - m) ** 2 for c in clipped) / max(len(clipped) - 1, 1), mean)
+        z = tail_to_z(negbin_upper_tail(count, mean, variance))
+        return z, mean, math.sqrt(variance)
+
     def _baseline_score(
-        self, entity_id: str, velocity: float
+        self, entity_id: str, velocity: float, count: int | None = None
     ) -> tuple[float, float, float] | None:
         """
         Score velocity against the entity's baseline.
@@ -203,6 +326,10 @@ class AnomalyDetector:
         buf = self._history[entity_id]
         if len(buf) < self._min_samples:
             return None
+        if self._baseline in ("poisson", "cusum"):
+            return self._score_poisson(self._counts[entity_id], int(count or 0))
+        if self._baseline == "negbin":
+            return self._score_negbin(self._counts[entity_id], int(count or 0))
         if self._baseline == "ewma":
             return self._score_ewma(entity_id, velocity)
         if self._baseline == "robust":
@@ -225,15 +352,27 @@ class AnomalyDetector:
         Separated from evaluate() so the detector can be unit-tested and replayed
         over historical data without a database.
         """
-        result = self._baseline_score(score.entity_id, score.velocity)
+        result = self._baseline_score(
+            score.entity_id, score.velocity, score.events_in_window
+        )
         self._history[score.entity_id].append(score.velocity)
+        self._counts[score.entity_id].append(score.events_in_window)
         self._update_ewma(score.entity_id, score.velocity)
 
         if result is None:
             return None
 
         z, centre, scale = result
-        if z < self._threshold:
+        if self._baseline == "cusum":
+            # Accumulate excess over the reference value; fire and reset once
+            # the running sum crosses the threshold.
+            total = max(0.0, self._cusum[score.entity_id] + z - CUSUM_K)
+            if total < self._threshold:
+                self._cusum[score.entity_id] = total
+                return None
+            self._cusum[score.entity_id] = 0.0
+            z = total
+        elif z < self._threshold:
             return None
 
         return AnomalyEvent(

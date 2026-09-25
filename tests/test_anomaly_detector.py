@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from processing.anomaly_detector import AnomalyDetector, _median
+from processing.anomaly_detector import (
+    AnomalyDetector,
+    _median,
+    negbin_upper_tail,
+    poisson_upper_tail,
+    tail_to_z,
+)
 from processing.velocity_scorer import VelocityScore
 
 
@@ -107,3 +113,82 @@ def test_detect_performs_no_io():
 )
 def test_median_of_sorted_values(values, expected):
     assert _median(values) == expected
+
+
+# ── count-based baselines ─────────────────────────────────────────────────────
+
+
+def _count_score(count: int, entity: str = "e") -> VelocityScore:
+    return VelocityScore(
+        entity_id=entity, events_in_window=count, velocity=count / 5.0, window_seconds=300
+    )
+
+
+def _feed_counts(detector: AnomalyDetector, counts: list[int]):
+    return [detector.detect(_count_score(c), platform="hn") for c in counts]
+
+
+@pytest.mark.parametrize(("count", "rate"), [(0, 1.0), (1, 0.3), (4, 1.5), (30, 2.0)])
+def test_poisson_upper_tail_matches_scipy(count, rate):
+    stats = pytest.importorskip("scipy.stats")
+    assert poisson_upper_tail(count, rate) == pytest.approx(
+        stats.poisson.sf(count - 1, rate), rel=1e-9, abs=1e-300
+    )
+
+
+def test_tail_to_z_is_the_normal_quantile():
+    assert tail_to_z(0.5) == pytest.approx(0.0, abs=1e-12)
+    assert tail_to_z(0.02275) == pytest.approx(2.0, abs=1e-3)
+    # Probabilities below machine epsilon still map to a finite, large z.
+    assert 30 < tail_to_z(1e-250) < 40
+
+
+def test_poisson_fires_on_sparse_counts_where_robust_abstains():
+    """
+    A quiet topic's window counts are mostly zero, so the MAD is zero and the
+    robust baseline cannot score anything. The count model still can.
+    """
+    quiet = [0, 0, 1, 0, 0, 0, 1, 0, 0, 0]
+    robust = AnomalyDetector(baseline="robust", min_samples=5, threshold=2.5)
+    poisson = AnomalyDetector(baseline="poisson", min_samples=5, threshold=2.5)
+    assert _feed_counts(robust, quiet + [12])[-1] is None
+    assert _feed_counts(poisson, quiet + [12])[-1] is not None
+
+
+def test_poisson_ignores_ordinary_fluctuation():
+    detector = AnomalyDetector(baseline="poisson", min_samples=5, threshold=3.0)
+    events = _feed_counts(detector, [2, 3, 1, 2, 4, 2, 3, 2, 1, 3, 4, 2])
+    assert all(e is None for e in events)
+
+
+def test_cusum_accumulates_sustained_excess_and_resets():
+    """Modest excess that no single sample would flag adds up; one alert, then reset."""
+    detector = AnomalyDetector(baseline="cusum", min_samples=5, threshold=5.0)
+    baseline = [2, 3, 2, 2, 3, 2, 2, 3, 2, 2]
+    events = _feed_counts(detector, baseline + [6, 6, 6, 6, 6])
+    fired = [i for i, e in enumerate(events) if e is not None]
+    assert len(fired) >= 1
+    assert fired[0] > len(baseline)  # needed more than one elevated sample
+    single = AnomalyDetector(baseline="poisson", min_samples=5, threshold=5.0)
+    assert all(e is None for e in _feed_counts(single, baseline + [6, 6, 6, 6, 6]))
+
+
+@pytest.mark.parametrize(("count", "mean", "var"), [(3, 1.0, 3.0), (10, 2.0, 8.0), (1, 0.4, 0.9)])
+def test_negbin_upper_tail_matches_scipy(count, mean, var):
+    stats = pytest.importorskip("scipy.stats")
+    r = mean * mean / (var - mean)
+    expected = stats.nbinom.sf(count - 1, r, r / (r + mean))
+    assert negbin_upper_tail(count, mean, var) == pytest.approx(expected, rel=1e-9)
+
+
+def test_negbin_without_overdispersion_is_poisson():
+    assert negbin_upper_tail(5, 1.5, 1.5) == pytest.approx(poisson_upper_tail(5, 1.5))
+
+
+def test_negbin_is_less_alarmed_by_clumpy_history_than_poisson():
+    clumpy = [0, 0, 5, 0, 1, 0, 6, 0, 0, 4, 0, 1, 0, 5, 0]
+    z = {}
+    for baseline in ("poisson", "negbin"):
+        detector = AnomalyDetector(baseline=baseline, min_samples=5, threshold=0.0)
+        z[baseline] = _feed_counts(detector, clumpy + [7])[-1].z_score
+    assert z["negbin"] < z["poisson"]
