@@ -34,7 +34,7 @@ database still holds the simulated dataset *and* the live capture.
 | 3 | Evaluation + calibration | ✅ three arms, reliability diagram, derived gate |
 | 4 | Anomaly baseline | ✅ median/MAD default, 3.5× fewer false alarms |
 | 5 | Retrieval correctness | ✅ partial HNSW index, recall measured |
-| 6 | Tests + CI | ✅ 95 tests, ruff clean, GitHub Actions |
+| 6 | Tests + CI | ✅ 145 tests, ruff clean, GitHub Actions |
 | — | Live ingestion | ✅ real Bluesky + HN, cascades characterised |
 | — | Propagation capture | ✅ HN comment threads and Mastodon replies, parents backfilled |
 | — | Learned deferral | ✅ built, **negative result**, not wired in |
