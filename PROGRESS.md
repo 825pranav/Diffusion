@@ -1,7 +1,7 @@
 # Diffusion — where things stand
 
 Working context. Read this first when picking the project back up.
-Last updated 2026-09-11.
+Last updated 2026-09-26.
 
 **What changed:** the project went from an LLM guessing at verdicts to a measured
 ML system — a difficulty-calibrated cascade simulator, a trained and calibrated
@@ -14,7 +14,7 @@ and Hacker News traffic.
 
 ```bash
 python -m scripts.devdb start      # embedded Postgres + schema, writes DATABASE_URL
-pytest                             # 95 tests, no services needed
+pytest                             # 145 tests, no services needed
 uvicorn api.main:app --reload      # API + agent listener + embedding indexer
 ```
 
@@ -38,6 +38,9 @@ database still holds the simulated dataset *and* the live capture.
 | — | Live ingestion | ✅ real Bluesky + HN, cascades characterised |
 | — | Propagation capture | ✅ HN comment threads and Mastodon replies, parents backfilled |
 | — | Learned deferral | ✅ built, **negative result**, not wired in |
+| 7 | Classifier upgrade | ✅ 14 features, nested Optuna, GIN baseline, shift benchmark, oracle ceiling |
+| 8 | Anomaly upgrade | ✅ Poisson / negative binomial / CUSUM, tuned per event on held-out topics |
+| — | Train/serve skew | ✅ single-cascade scoring now sees its trailing window |
 
 ---
 
@@ -47,11 +50,14 @@ Full tables in [`docs/results.md`](docs/results.md), all script-generated.
 
 | Measurement | Result |
 |---|---|
-| Classifier, 5-fold CV | F1 **0.882 ± 0.039**, ROC-AUC 0.929 |
-| Classifier, held out (400) | F1 **0.882**, ROC-AUC 0.938, Brier **0.086** |
-| By subtype | `plain` 0.941 · `viral_organic` 0.781 · `stealth_coordinated` 0.393 |
+| Classifier, 5-fold CV | F1 **0.893 ± 0.030**, ROC-AUC 0.946 (was 0.860, 0.929) |
+| Classifier, held out (400) | macro F1 **0.910**, ROC-AUC **0.960**, Brier **0.069** (was 0.889, 0.938, 0.086) |
+| By subtype (held out) | `plain` 0.971 · `viral_organic` 0.812 · `stealth_coordinated` 0.286 (was 0.941 · 0.781 · 0.393) |
+| GIN on reshare trees | CV ROC-AUC 0.920 vs 0.948 tuned LightGBM — does not win |
+| Oracle ceiling | true simulator params: ROC-AUC 0.981, `stealth_coordinated` 0.561 |
+| Anomaly, per event, 150 held-out topics | CUSUM 0.08 FP/topic-day at recall 0.846 vs median/MAD 1.35 at 0.832 |
 | Review gate | **0.55**, derived — 90.7% accuracy at 96.8% coverage |
-| Anomaly baseline | median/MAD cuts false alarms **3.5×** vs z-score (5.06 → 1.44 per topic-day) |
+| Anomaly baseline (fixed 2.5, clock ticks) | median/MAD cuts false alarms 3.4× vs z-score (4.99 → 1.48 per topic-day on the 50 topics the DB now replays; the earlier 5.06 → 1.44 was a 40-topic replay) |
 | Filtered vector search | table-wide HNSW returns **2.46 of 5** rows at 5% selectivity; partial index returns 5 |
 | Learned deferral | 0.958 vs 0.957 for confidence — **no gain** |
 | Live capture | **103,544 reshare edges**, 262,349 real nodes from Bluesky + HN |
@@ -61,6 +67,27 @@ Full tables in [`docs/results.md`](docs/results.md), all script-generated.
 ---
 
 ## The findings worth remembering
+
+**0. (2026-09-26) New features beat new models, and the hard subtype is a ceiling.**
+Fourteen features — log-delay spread, structural virality, a root-attachment
+MLE, and co-author overlap across recent cascades — won all ten paired CV folds
+and moved held-out ROC-AUC 0.938 → 0.960 (bootstrap 95% CI on the gain +0.007
+to +0.039). Optuna under nested CV bought calibration, not discrimination. A
+GIN over the raw trees lost to LightGBM on identical information, and an
+ensemble did not help. `stealth_coordinated` did not improve (0.393 → 0.286 on
+28 cascades): a model given the simulator's *true parameters* only reaches 0.56
+on it, so most of that gap is the generator's deliberate overlap, not missing
+features.
+
+**0b. The agent's model tool had been scoring with its best feature zeroed.**
+`score_cascade` featurised one root alone, so windowed author reuse read zero
+at inference. Measured: ROC-AUC 0.929 → 0.874. Fixed by featurising the
+root's trailing window with it.
+
+**0c. Detector thresholds do not transfer between sampling regimes.**
+The replay used a 5-minute clock; the consumer samples per event. Per event,
+z-score at its clock-tuned 5 catches 4% of campaigns. The default is now
+per-event-tuned CUSUM over Poisson tails.
 
 **1. A feature drifted across its own train/test split.**
 Author reuse was counted cumulatively from the start of the dataset, so it grew
@@ -180,16 +207,21 @@ on an embedded database rather than the compose stack.
    capture to see how far the live distribution has moved toward the
    simulator's. That comparison is what decides whether live scores can be
    trusted, and it now has real thread structure to work with.
-2. **New features for `stealth_coordinated`.** Account age, posting-schedule
-   regularity, or coordination structure *across* cascades rather than within
-   one. This is the documented ceiling — no gating or model change touches it.
-3. **Re-run the LLM arms properly.** Current numbers are a local 7B over ~17
-   verdicts, where run-to-run variance swamps the difference between arms. Needs
-   Groq (rate limits permitting) and a sample in the hundreds before the
-   `llm` vs `hybrid` comparison means anything.
-4. **Calibrate explicitly** (isotonic/Platt) and re-derive the gate. Brier is
-   already 0.086 after the drift fix, so gains will be smaller than they would
-   have been, but it makes the probabilities defensible rather than incidental.
+2. **`stealth_coordinated` is now mostly a simulator question.** Cross-cascade
+   co-author features were added and did not move it; the oracle on true
+   parameters reaches only 0.56. Further gains need either account-level
+   signals the simulator does not yet model (account age, schedule regularity)
+   or a decision that the stealth parameter ranges overlap organic by too much.
+3. **Re-run the LLM arms properly** — and against the upgraded classifier.
+   The `Classifier vs LLM agent` section still shows the original model's row.
+   Needs Groq (rate limits permitting) or the local model server, and a sample
+   in the hundreds.
+4. **Validate CUSUM on live traffic.** It was chosen on replayed simulator
+   streams, including an overdispersed stress test, but not on a live capture.
+   Its `z_score` column now carries the CUSUM statistic, not a z-score.
+5. **Desynchronised campaigns** are the one shift where the upgraded model
+   loses to the original (0.916 vs 0.928 ROC-AUC): the log-delay features are
+   what that shift attacks. Domain randomisation did not recover it.
 
 ---
 
@@ -207,6 +239,11 @@ on an embedded database rather than the compose stack.
 - **Failed investigations write nothing.** The old code wrote "uncertain at
   confidence 0.0" and marked the anomaly investigated — asserting a verdict
   nothing supported and hiding the failure permanently.
+- **LightGBM over the GIN.** The GNN saw the same per-post information and lost
+  on CV (0.920 vs 0.948); it is kept as a measured baseline, not shipped.
+- **Calibration by tuning, not by wrapper.** Isotonic calibration on top of the
+  tuned model changed nothing measurable, and a wrapper would break the
+  per-prediction attributions the agent reads.
 - **Deferral kept but not wired in.** It ties confidence gating, and added
   complexity has to buy something measurable.
 
