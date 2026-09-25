@@ -5,42 +5,42 @@ script — do not edit by hand.
 
 ## Virality classifier — cross-validation
 
-LightGBM, positive class = `coordinated`. 5-fold stratified
+LightGBM with 37 features and hyperparameters tuned by Optuna on the training split (`ml/tuned_params.json`), positive class =
+`coordinated`. 5-fold stratified
 cross-validation on the training split only (1600 cascades); 400
 cascades are held out for `ml/evaluate.py` and never seen here.
 
 | metric | mean | std | min | max |
 |---|---|---|---|---|
-| precision | 0.887 | 0.027 | 0.851 | 0.919 |
-| recall | 0.836 | 0.060 | 0.753 | 0.914 |
-| f1 | 0.860 | 0.039 | 0.813 | 0.911 |
-| roc_auc | 0.929 | 0.027 | 0.892 | 0.964 |
-| pr_auc | 0.942 | 0.020 | 0.913 | 0.967 |
+| precision | 0.917 | 0.013 | 0.908 | 0.940 |
+| recall | 0.871 | 0.052 | 0.790 | 0.920 |
+| f1 | 0.893 | 0.030 | 0.845 | 0.917 |
+| roc_auc | 0.946 | 0.022 | 0.915 | 0.970 |
+| pr_auc | 0.958 | 0.015 | 0.937 | 0.971 |
 
 ### Feature importance (gain)
 
 | feature | gain | share |
 |---|---|---|
-| prior_author_mean | 6,070 | 30.4% |
-| cross_platform_edge_frac | 1,594 | 8.0% |
-| time_to_half_s | 1,410 | 7.1% |
-| mean_children | 1,207 | 6.0% |
-| leaf_frac | 1,118 | 5.6% |
-| first_hop_lag_s | 1,044 | 5.2% |
-| root_fanout_share | 977 | 4.9% |
-| delay_median_s | 928 | 4.6% |
-| prior_author_frac | 875 | 4.4% |
-| delay_cv | 751 | 3.8% |
-| delay_mean_s | 556 | 2.8% |
-| peak_rate_per_min | 516 | 2.6% |
+| log_delay_std | 2,556 | 19.0% |
+| prior_author_frac_ge3 | 2,024 | 15.0% |
+| log_delay_iqr | 1,726 | 12.8% |
+| prior_author_p75 | 784 | 5.8% |
+| coauthor_linked_frac | 692 | 5.1% |
+| cross_platform_edge_frac | 606 | 4.5% |
+| leaf_frac | 532 | 4.0% |
+| prior_author_mean | 522 | 3.9% |
+| first_hop_lag_s | 448 | 3.3% |
+| coauthor_overlap_max | 325 | 2.4% |
+| root_attach_mle | 311 | 2.3% |
+| mean_children | 302 | 2.2% |
 
 Reproduce with `python -m ml.train`.
 
 ## Anomaly baselines — replay comparison
 
-
 Every topic's mention stream replayed through the production `VelocityScorer`
-and `AnomalyDetector` at a 300s tick (40 topics). A detection is
+and `AnomalyDetector` at a 300s tick (50 topics). A detection is
 *explained* if a cascade began on that topic within
 60 minutes before it; unexplained detections
 fired on baseline noise and are the false positives.
@@ -52,9 +52,12 @@ of its cases.
 
 | baseline | detections | coord. recall | organic recall | FP rate | FP / topic-day | median delay (min) |
 |---|---|---|---|---|---|---|
-| `zscore` | 1,173 | 0.834 | 0.784 | 0.522 | 5.06 | 3.3 |
-| `robust` | 863 | 0.761 | 0.708 | 0.202 | 1.44 | 3.4 |
-| `ewma` | 1,225 | 0.888 | 0.854 | 0.660 | 6.69 | 3.2 |
+| `zscore` | 1,457 | 0.850 | 0.790 | 0.520 | 4.99 | 3.3 |
+| `robust` | 1,088 | 0.736 | 0.706 | 0.206 | 1.48 | 3.4 |
+| `ewma` | 1,518 | 0.894 | 0.857 | 0.653 | 6.54 | 3.1 |
+| `poisson` | 2,136 | 0.972 | 0.950 | 0.322 | 4.53 | 3.2 |
+| `negbin` | 1,059 | 0.913 | 0.798 | 0.195 | 1.36 | 3.2 |
+| `cusum` | 2,552 | 0.988 | 0.975 | 0.395 | 6.64 | 3.2 |
 
 Reproduce with `python -m ml.eval_anomaly`.
 
@@ -340,3 +343,402 @@ seed  ·  (not captured)
 
 Reproduce with `python -m scripts.ingest_live --minutes 20` then
 `python -m ml.analyze_real`.
+
+## Classifier experiments — training-split CV
+
+Every arm scored on the same 5-fold x 2-repeat stratified split of
+the temporal training split (1600 cascades), so fold-to-fold differences
+are paired. The holdout is not used here. Optuna runs 30 TPE trials per
+outer fold on 3 inner folds of that fold's training rows (nested), so
+the tuned arm is not scored on data its search saw. The GNN trains for
+30 epochs per fold with no early stopping (no inner validation to stop on).
+
+| arm | what it is |
+|---|---|
+| `logreg (all features)` | Logistic regression, standardised — a linear floor |
+| `lgbm (base features)` | The shipped model: original 23 features, original params |
+| `lgbm (+ new features)` | Original params, 37 features |
+| `lgbm (+ new, Optuna)` | 37 features, params tuned per outer fold (nested) |
+| `lgbm (+ new, Optuna, isotonic)` | Tuned, then isotonic calibration on inner folds |
+| `GIN (tree GNN)` | Graph neural network on the reshare tree itself |
+| `GIN + lgbm (mean)` | Average of the GNN and the tuned LightGBM probabilities |
+
+| arm | macro F1 | ROC-AUC | PR-AUC | Brier | ECE | stealth_coord. acc | viral_organic acc |
+|---|---|---|---|---|---|---|---|
+| `logreg (all features)` | 0.888 ± 0.022 | 0.939 ± 0.021 | 0.953 ± 0.014 | 0.088 ± 0.016 | 0.053 ± 0.007 | 0.393 ± 0.158 | 0.783 ± 0.078 |
+| `lgbm (base features)` | 0.864 ± 0.027 | 0.930 ± 0.021 | 0.943 ± 0.016 | 0.105 ± 0.021 | 0.074 ± 0.021 | 0.439 ± 0.119 | 0.734 ± 0.112 |
+| `lgbm (+ new features)` | 0.899 ± 0.024 | 0.947 ± 0.019 | 0.959 ± 0.013 | 0.085 ± 0.020 | 0.064 ± 0.020 | 0.434 ± 0.148 | 0.767 ± 0.040 |
+| `lgbm (+ new, Optuna)` | 0.897 ± 0.023 | 0.948 ± 0.019 | 0.960 ± 0.013 | 0.082 ± 0.017 | 0.045 ± 0.010 | 0.425 ± 0.148 | 0.753 ± 0.071 |
+| `lgbm (+ new, Optuna, isotonic)` | 0.899 ± 0.022 | 0.948 ± 0.020 | 0.957 ± 0.015 | 0.082 ± 0.017 | 0.045 ± 0.012 | 0.421 ± 0.152 | 0.749 ± 0.062 |
+| `GIN (tree GNN)` | 0.858 ± 0.019 | 0.920 ± 0.024 | 0.938 ± 0.015 | 0.109 ± 0.018 | 0.064 ± 0.021 | 0.387 ± 0.118 | 0.740 ± 0.075 |
+| `GIN + lgbm (mean)` | 0.889 ± 0.023 | 0.944 ± 0.020 | 0.956 ± 0.014 | 0.087 ± 0.017 | 0.045 ± 0.019 | 0.414 ± 0.129 | 0.787 ± 0.059 |
+
+### Paired difference against the shipped model
+
+Mean ± std of the per-fold difference, and how many of the
+10 folds the arm won. Lower Brier is better.
+
+| arm | Δ macro F1 | Δ ROC-AUC | Δ Brier |
+|---|---|---|---|
+| `logreg (all features)` | +0.024 ± 0.017 (10/10) | +0.010 ± 0.005 (10/10) | -0.017 ± 0.008 (10/10) |
+| `lgbm (+ new features)` | +0.035 ± 0.014 (10/10) | +0.017 ± 0.006 (10/10) | -0.021 ± 0.009 (10/10) |
+| `lgbm (+ new, Optuna)` | +0.033 ± 0.015 (10/10) | +0.018 ± 0.005 (10/10) | -0.023 ± 0.008 (10/10) |
+| `lgbm (+ new, Optuna, isotonic)` | +0.035 ± 0.017 (10/10) | +0.018 ± 0.006 (10/10) | -0.023 ± 0.010 (10/10) |
+| `GIN (tree GNN)` | -0.006 ± 0.015 (4/10) | -0.009 ± 0.009 (1/10) | +0.004 ± 0.008 (3/10) |
+| `GIN + lgbm (mean)` | +0.025 ± 0.014 (9/10) | +0.014 ± 0.005 (10/10) | -0.019 ± 0.007 (10/10) |
+
+Reproduce with `python -m ml.experiment cv`.
+
+## Anomaly baselines — tuned on held-out topics (300s clock ticks)
+
+Each topic is scored on a 300s clock, like the fixed-threshold table.
+
+The fixed-threshold table fixes every detector at 2.5, which is not a fair
+fight: each baseline's z-scale means something different. Here each one is
+swept, its threshold is chosen on **50 tuning topics** (the ones in the
+fixed-threshold replay table), and the chosen operating points are then scored on
+**150 different topics** that none of the choices saw.
+
+Selection rule: the fewest false alarms per topic-day among thresholds whose
+coordinated recall on the tuning topics reaches the previous default's
+(`robust` at 2.5: 0.736). That holds recall fixed and
+asks which detector pays the least noise for it.
+
+### Held-out topics, at the tuned thresholds
+
+| detector | detections | coord. recall | organic recall | FP rate | FP / topic-day | median delay (min) |
+|---|---|---|---|---|---|---|
+| `robust` @ 2.5 (previous default) | 3,448 | 0.745 | 0.690 | 0.226 | 1.72 | 4.0 |
+| `zscore` @ 5 (tuned) | 1,218 | 0.717 | 0.552 | 0.093 | 0.25 | 3.7 |
+| `ewma` @ 5 (tuned) | 1,183 | 0.775 | 0.559 | 0.145 | 0.38 | 3.6 |
+| `poisson` @ 5 (tuned) | 1,737 | 0.800 | 0.593 | 0.013 | 0.05 | 3.7 |
+| `negbin` @ 3.5 (tuned) | 1,477 | 0.716 | 0.552 | 0.030 | 0.10 | 3.7 |
+| `cusum` @ 8 (tuned) | 2,014 | 0.808 | 0.728 | 0.080 | 0.36 | 4.8 |
+
+### Tuning-topic sweep
+
+`pareto` marks points that no other detector/threshold beats on both false
+alarms and coordinated recall.
+
+| baseline | threshold | coord. recall | FP / topic-day | median delay (min) | pareto |
+|---|---|---|---|---|---|
+| `zscore` | 2 | 0.906 | 9.01 | 3.2 |  |
+| `zscore` | 2.5 | 0.850 | 4.99 | 3.3 |  |
+| `zscore` | 3 | 0.827 | 2.56 | 3.3 |  |
+| `zscore` | 3.5 | 0.807 | 1.48 | 3.3 |  |
+| `zscore` | 4 | 0.799 | 0.80 | 3.4 |  |
+| `zscore` | 5 | 0.748 | 0.23 | 3.4 |  |
+| `zscore` | 6 | 0.654 | 0.11 | 3.4 |  |
+| `robust` | 2 | 0.764 | 5.84 | 3.4 |  |
+| `robust` | 2.5 | 0.736 | 1.48 | 3.4 |  |
+| `robust` | 3 | 0.713 | 0.75 | 3.6 |  |
+| `robust` | 3.5 | 0.665 | 0.27 | 3.6 |  |
+| `robust` | 4 | 0.665 | 0.27 | 3.6 |  |
+| `robust` | 5 | 0.594 | 0.04 | 3.6 |  |
+| `robust` | 6 | 0.547 | 0.03 | 3.6 |  |
+| `robust` | 8 | 0.417 | 0.00 | 3.4 |  |
+| `ewma` | 2 | 0.909 | 11.04 | 3.0 |  |
+| `ewma` | 2.5 | 0.894 | 6.54 | 3.1 |  |
+| `ewma` | 3 | 0.886 | 3.88 | 3.2 |  |
+| `ewma` | 3.5 | 0.862 | 2.08 | 3.3 |  |
+| `ewma` | 4 | 0.835 | 1.15 | 3.3 |  |
+| `ewma` | 5 | 0.744 | 0.40 | 3.3 |  |
+| `ewma` | 6 | 0.673 | 0.18 | 3.3 |  |
+| `ewma` | 8 | 0.610 | 0.03 | 3.4 |  |
+| `poisson` | 2 | 0.988 | 10.92 | 3.0 |  |
+| `poisson` | 2.5 | 0.972 | 4.53 | 3.2 | yes |
+| `poisson` | 3 | 0.957 | 1.60 | 3.2 | yes |
+| `poisson` | 3.5 | 0.925 | 0.59 | 3.3 | yes |
+| `poisson` | 4 | 0.886 | 0.24 | 3.3 | yes |
+| `poisson` | 4.5 | 0.874 | 0.09 | 3.4 | yes |
+| `poisson` | 5 | 0.791 | 0.02 | 3.4 | yes |
+| `poisson` | 6 | 0.713 | 0.00 | 3.3 | yes |
+| `negbin` | 2 | 0.972 | 5.16 | 3.2 |  |
+| `negbin` | 2.5 | 0.913 | 1.36 | 3.2 |  |
+| `negbin` | 3 | 0.854 | 0.27 | 3.4 |  |
+| `negbin` | 3.5 | 0.748 | 0.09 | 3.4 |  |
+| `negbin` | 4 | 0.650 | 0.04 | 3.4 |  |
+| `negbin` | 4.5 | 0.591 | 0.01 | 3.4 |  |
+| `negbin` | 5 | 0.512 | 0.01 | 3.3 |  |
+| `negbin` | 6 | 0.382 | 0.00 | 3.4 |  |
+| `cusum` | 2 | 0.992 | 10.22 | 3.2 | yes |
+| `cusum` | 3 | 0.972 | 4.55 | 3.2 |  |
+| `cusum` | 4 | 0.953 | 2.23 | 3.4 |  |
+| `cusum` | 5 | 0.909 | 1.21 | 3.6 |  |
+| `cusum` | 6 | 0.882 | 0.74 | 4.0 |  |
+| `cusum` | 8 | 0.780 | 0.36 | 4.4 |  |
+| `cusum` | 10 | 0.693 | 0.20 | 5.4 |  |
+| `cusum` | 12 | 0.630 | 0.11 | 6.1 |  |
+| `cusum` | 15 | 0.543 | 0.10 | 8.3 |  |
+| `cusum` | 20 | 0.382 | 0.03 | 9.4 |  |
+| `cusum` | 25 | 0.256 | 0.01 | 15.0 |  |
+
+Reproduce with `python -m ml.eval_anomaly --sweep --tick 300`.
+
+## Anomaly baselines — clumped-chatter stress test (300s clock ticks)
+
+The simulator's background chatter is a pure (diurnal) Poisson process — which
+is exactly what the `poisson` detector assumes. A detector scored only in the
+world it assumes is being flattered, so here the thresholds tuned above are
+kept **unchanged** and re-scored on the same 150 held-out topics
+with overdispersed chatter: every background mention gets a Poisson(`clumps`)
+number of echoes about a minute and a half later. That is ordinary
+conversation that clumps without being a cascade, and it is what real mention
+counts look like. `clumps = 0` regenerates the database streams in memory and
+reproduces the matching held-out table (up to float rounding).
+
+| clumps | detector | coord. recall | organic recall | FP / topic-day | median delay (min) |
+|---|---|---|---|---|---|
+| 0 | `robust` @ 2.5 (previous default) | 0.745 | 0.690 | 1.73 | 3.9 |
+| 0 | `zscore` @ 5 | 0.716 | 0.552 | 0.25 | 3.7 |
+| 0 | `ewma` @ 5 | 0.775 | 0.558 | 0.38 | 3.6 |
+| 0 | `poisson` @ 5 | 0.802 | 0.593 | 0.05 | 3.7 |
+| 0 | `negbin` @ 3.5 | 0.713 | 0.551 | 0.10 | 3.7 |
+| 0 | `cusum` @ 8 | 0.808 | 0.728 | 0.36 | 4.8 |
+| 1 | `robust` @ 2.5 (previous default) | 0.830 | 0.772 | 11.42 | 4.0 |
+| 1 | `zscore` @ 5 | 0.563 | 0.369 | 0.45 | 3.7 |
+| 1 | `ewma` @ 5 | 0.621 | 0.382 | 0.91 | 3.6 |
+| 1 | `poisson` @ 5 | 0.760 | 0.554 | 1.13 | 3.7 |
+| 1 | `negbin` @ 3.5 | 0.485 | 0.286 | 0.10 | 3.8 |
+| 1 | `cusum` @ 8 | 0.820 | 0.740 | 3.01 | 4.9 |
+| 3 | `robust` @ 2.5 (previous default) | 0.787 | 0.698 | 15.31 | 3.9 |
+| 3 | `zscore` @ 5 | 0.399 | 0.209 | 0.48 | 3.9 |
+| 3 | `ewma` @ 5 | 0.426 | 0.215 | 0.87 | 3.7 |
+| 3 | `poisson` @ 5 | 0.777 | 0.587 | 6.34 | 3.9 |
+| 3 | `negbin` @ 3.5 | 0.261 | 0.112 | 0.06 | 3.9 |
+| 3 | `cusum` @ 8 | 0.831 | 0.769 | 8.72 | 5.1 |
+
+Reproduce with `python -m ml.eval_anomaly --sweep --tick 300`.
+
+## Classifier upgrade — held-out result
+
+The configuration chosen by cross-validation above, scored once on the
+400 temporally held-out cascades (database copy, the same rows as
+`ml/evaluate.py`), next to the original configuration refit on the same
+training split. Nothing about the upgraded model was chosen by looking at
+these rows.
+
+| model | accuracy | macro F1 | ROC-AUC | PR-AUC | Brier | ECE |
+|---|---|---|---|---|---|---|
+| original — 23 features, default params | 0.890 | 0.889 | 0.938 | 0.952 | 0.086 | 0.059 |
+| upgraded — 37 features, Optuna params | 0.910 | 0.910 | 0.960 | 0.969 | 0.069 | 0.044 |
+
+Paired bootstrap over held-out cascades (2,000 resamples), upgraded minus
+original: ROC-AUC +0.022 (95% CI +0.007 to +0.039),
+macro F1 +0.020 (95% CI -0.003 to +0.045).
+
+### By subtype
+
+| subtype | n | original accuracy | upgraded accuracy |
+|---|---|---|---|
+| `plain` | 340 | 0.941 | 0.971 |
+| `viral_organic` | 32 | 0.781 | 0.812 |
+| `stealth_coordinated` | 28 | 0.393 | 0.286 |
+
+### Review gate, re-derived
+
+Lowest confidence gate whose published predictions reach
+90% accuracy, read off each model's own held-out predictions.
+
+| model | gate | accuracy above gate | auto-published |
+|---|---|---|---|
+| original | 0.55 | 0.907 | 96.8% |
+| upgraded | 0.50 | 0.910 | 100.0% |
+
+The `Classifier vs LLM agent` section predates this upgrade: its `classifier` row is
+the original configuration, and the LLM arms have not been re-run (they need the
+local model server).
+
+Reproduce with `python -m ml.experiment holdout`.
+
+## Anomaly baselines — tuned on held-out topics (per event, as deployed)
+
+Each topic is scored on every arriving event, exactly as `processing.consumer` does in production — so the history a baseline is built from is a history of event-time samples, not of a clock.
+
+The fixed-threshold table fixes every detector at 2.5, which is not a fair
+fight: each baseline's z-scale means something different. Here each one is
+swept, its threshold is chosen on **50 tuning topics** (the ones in the
+fixed-threshold replay table), and the chosen operating points are then scored on
+**150 different topics** that none of the choices saw.
+
+Selection rule: the fewest false alarms per topic-day among thresholds whose
+coordinated recall on the tuning topics reaches the previous default's
+(`robust` at 2.5: 0.811). That holds recall fixed and
+asks which detector pays the least noise for it.
+
+No threshold in the grid reaches that recall for `ewma`, `negbin`; left out of the table below.
+
+### Held-out topics, at the tuned thresholds
+
+| detector | detections | coord. recall | organic recall | FP rate | FP / topic-day | median delay (min) |
+|---|---|---|---|---|---|---|
+| `robust` @ 2.5 (previous default) | 17,535 | 0.832 | 0.730 | 0.035 | 1.35 | 0.8 |
+| `zscore` @ 2 (tuned) | 21,422 | 0.855 | 0.791 | 0.162 | 7.69 | 0.7 |
+| `poisson` @ 3 (tuned) | 20,420 | 0.819 | 0.636 | 0.003 | 0.13 | 0.9 |
+| `cusum` @ 12 (tuned) | 8,083 | 0.846 | 0.684 | 0.004 | 0.08 | 1.1 |
+
+### Tuning-topic sweep
+
+`pareto` marks points that no other detector/threshold beats on both false
+alarms and coordinated recall.
+
+| baseline | threshold | coord. recall | FP / topic-day | median delay (min) | pareto |
+|---|---|---|---|---|---|
+| `zscore` | 2 | 0.843 | 8.08 | 0.7 |  |
+| `zscore` | 2.5 | 0.791 | 4.14 | 0.7 |  |
+| `zscore` | 3 | 0.732 | 1.97 | 0.8 |  |
+| `zscore` | 3.5 | 0.606 | 0.88 | 0.7 |  |
+| `zscore` | 4 | 0.437 | 0.32 | 0.6 |  |
+| `zscore` | 5 | 0.043 | 0.01 | 0.4 |  |
+| `zscore` | 6 | 0.000 | 0.01 | n/a |  |
+| `robust` | 2 | 0.870 | 4.88 | 0.7 |  |
+| `robust` | 2.5 | 0.811 | 1.31 | 0.8 |  |
+| `robust` | 3 | 0.783 | 0.53 | 0.8 |  |
+| `robust` | 3.5 | 0.740 | 0.15 | 0.9 |  |
+| `robust` | 4 | 0.732 | 0.15 | 0.9 |  |
+| `robust` | 5 | 0.661 | 0.03 | 1.0 |  |
+| `robust` | 6 | 0.583 | 0.02 | 0.9 |  |
+| `robust` | 8 | 0.457 | 0.00 | 1.0 |  |
+| `ewma` | 2 | 0.772 | 8.79 | 0.5 |  |
+| `ewma` | 2.5 | 0.504 | 3.80 | 0.6 |  |
+| `ewma` | 3 | 0.154 | 1.09 | 0.4 |  |
+| `ewma` | 3.5 | 0.028 | 0.30 | 0.3 |  |
+| `ewma` | 4 | 0.004 | 0.11 | 0.1 |  |
+| `ewma` | 5 | 0.000 | 0.01 | n/a |  |
+| `ewma` | 6 | 0.000 | 0.01 | n/a |  |
+| `ewma` | 8 | 0.000 | 0.00 | n/a |  |
+| `poisson` | 2 | 0.921 | 1.49 | 0.7 |  |
+| `poisson` | 2.5 | 0.874 | 0.36 | 0.8 | yes |
+| `poisson` | 3 | 0.815 | 0.09 | 0.9 |  |
+| `poisson` | 3.5 | 0.748 | 0.01 | 0.9 | yes |
+| `poisson` | 4 | 0.693 | 0.00 | 0.9 | yes |
+| `poisson` | 4.5 | 0.654 | 0.00 | 1.0 |  |
+| `poisson` | 5 | 0.587 | 0.00 | 1.0 |  |
+| `poisson` | 6 | 0.465 | 0.00 | 1.1 |  |
+| `negbin` | 2 | 0.807 | 1.38 | 0.8 |  |
+| `negbin` | 2.5 | 0.689 | 0.32 | 0.8 |  |
+| `negbin` | 3 | 0.579 | 0.07 | 0.7 |  |
+| `negbin` | 3.5 | 0.457 | 0.01 | 0.8 |  |
+| `negbin` | 4 | 0.323 | 0.00 | 0.9 |  |
+| `negbin` | 4.5 | 0.146 | 0.00 | 0.9 |  |
+| `negbin` | 5 | 0.000 | 0.00 | n/a |  |
+| `negbin` | 6 | 0.000 | 0.00 | n/a |  |
+| `cusum` | 2 | 0.937 | 3.90 | 0.6 | yes |
+| `cusum` | 3 | 0.933 | 2.06 | 0.7 | yes |
+| `cusum` | 4 | 0.921 | 1.17 | 0.7 | yes |
+| `cusum` | 5 | 0.909 | 0.73 | 0.8 | yes |
+| `cusum` | 6 | 0.890 | 0.53 | 0.8 | yes |
+| `cusum` | 8 | 0.870 | 0.28 | 0.9 | yes |
+| `cusum` | 10 | 0.846 | 0.13 | 1.0 | yes |
+| `cusum` | 12 | 0.831 | 0.06 | 1.0 | yes |
+| `cusum` | 15 | 0.783 | 0.04 | 1.0 | yes |
+| `cusum` | 20 | 0.748 | 0.01 | 1.1 | yes |
+| `cusum` | 25 | 0.724 | 0.01 | 1.2 |  |
+
+Reproduce with `python -m ml.eval_anomaly --sweep --tick 0`.
+
+## Anomaly baselines — clumped-chatter stress test (per event, as deployed)
+
+The simulator's background chatter is a pure (diurnal) Poisson process — which
+is exactly what the `poisson` detector assumes. A detector scored only in the
+world it assumes is being flattered, so here the thresholds tuned above are
+kept **unchanged** and re-scored on the same 150 held-out topics
+with overdispersed chatter: every background mention gets a Poisson(`clumps`)
+number of echoes about a minute and a half later. That is ordinary
+conversation that clumps without being a cascade, and it is what real mention
+counts look like. `clumps = 0` regenerates the database streams in memory and
+reproduces the matching held-out table (up to float rounding).
+
+| clumps | detector | coord. recall | organic recall | FP / topic-day | median delay (min) |
+|---|---|---|---|---|---|
+| 0 | `robust` @ 2.5 (previous default) | 0.832 | 0.730 | 1.35 | 0.8 |
+| 0 | `zscore` @ 2 | 0.855 | 0.791 | 7.69 | 0.7 |
+| 0 | `poisson` @ 3 | 0.818 | 0.638 | 0.13 | 0.9 |
+| 0 | `cusum` @ 12 | 0.846 | 0.684 | 0.08 | 1.1 |
+| 1 | `robust` @ 2.5 (previous default) | 0.823 | 0.727 | 20.53 | 0.9 |
+| 1 | `zscore` @ 2 | 0.865 | 0.799 | 23.87 | 0.9 |
+| 1 | `poisson` @ 3 | 0.815 | 0.635 | 6.17 | 1.0 |
+| 1 | `cusum` @ 12 | 0.870 | 0.745 | 3.99 | 1.2 |
+| 3 | `robust` @ 2.5 (previous default) | 0.721 | 0.568 | 30.73 | 1.3 |
+| 3 | `zscore` @ 2 | 0.843 | 0.743 | 57.62 | 1.1 |
+| 3 | `poisson` @ 3 | 0.824 | 0.692 | 47.70 | 1.2 |
+| 3 | `cusum` @ 12 | 0.901 | 0.823 | 24.40 | 1.3 |
+
+Reproduce with `python -m ml.eval_anomaly --sweep --tick 0`.
+
+## Robustness — simulator parameter shift
+
+Each model is trained once on the ordinary training split (1,600 cascades,
+seed 42) and then scored on 2,000 fresh cascades from a *perturbed* simulator
+(seed 7). Every perturbation makes coordinated cascades look more like
+organic ones in one specific way. Cells are **ROC-AUC / macro F1**.
+
+The last column adds domain randomisation: 400 extra training cascades from
+each of six simulators with one randomly perturbed campaign parameter
+(delay, delay spread, bot share, root attachment, bot pool size, confusable
+share). For every single-family row the augmentation **leaves that family
+out** (the "slower campaigns" row is scored by a model that never saw
+slowed-down campaigns), so the column measures transfer to an unseen kind of
+shift. The in-distribution and combined "camouflaged" rows use all six
+families — the camouflaged row is therefore *not* a held-out-family test.
+
+| shift | what changes | lgbm base | lgbm tuned + new | GIN | lgbm tuned + new, domain-randomised |
+|---|---|---|---|---|---|
+| in-distribution (new seed) | — | 0.939 / 0.878 | 0.958 / 0.897 | 0.939 / 0.878 | 0.958 / 0.906 |
+| harder mix | difficulty=hard: 28% confusable subtypes, wider spread | 0.896 / 0.819 | 0.922 / 0.849 | 0.897 / 0.820 | 0.927 / 0.847 |
+| slower campaigns | coordinated delays x3 | 0.917 / 0.850 | 0.953 / 0.895 | 0.923 / 0.845 | 0.956 / 0.903 |
+| desynchronised | coordinated delay sigma +0.5 | 0.928 / 0.865 | 0.916 / 0.820 | 0.905 / 0.843 | 0.905 / 0.823 |
+| more human accounts | coordinated bot share x0.5 | 0.882 / 0.790 | 0.919 / 0.844 | 0.892 / 0.803 | 0.920 / 0.847 |
+| larger bot pool | 2,000 bots instead of 400: far less reuse per account | 0.877 / 0.740 | 0.928 / 0.798 | 0.877 / 0.757 | 0.927 / 0.806 |
+| less star-shaped | coordinated root attachment x0.6 | 0.897 / 0.823 | 0.938 / 0.887 | 0.913 / 0.842 | 0.937 / 0.874 |
+| all-stealth | every cascade is its confusable subtype | 0.534 / 0.502 | 0.549 / 0.495 | 0.607 / 0.507 | 0.518 / 0.477 |
+| camouflaged | delays x2.5, sigma +0.4, bot share x0.6, root attachment x0.6 | 0.717 / 0.572 | 0.725 / 0.513 | 0.744 / 0.596 | 0.746 / 0.589 |
+
+Reproduce with `python -m ml.experiment shift`.
+
+## Classifier ceiling — oracle on true simulator parameters
+
+A LightGBM given each cascade's **true generating parameters** (root attachment,
+delay median and spread, bot share, hop probability and lag) instead of
+anything observed, cross-validated on the training split exactly like the arms
+above. This deliberately leaks the simulator: nothing measured from a cascade
+can carry more information than the parameters that produced it, so these
+numbers are a ceiling.
+
+| metric (CV mean) | oracle |
+|---|---|
+| macro_f1 | 0.936 |
+| roc_auc | 0.981 |
+| acc_plain | 0.975 |
+| acc_viral_organic | 0.932 |
+| acc_stealth_coordinated | 0.561 |
+
+Where the oracle fails, the two classes overlap by construction: a stealth
+campaign's parameters are drawn from ranges that organic cascades also occupy,
+and no feature engineering can separate what the generator made identical.
+
+Reproduce with `python -m ml.experiment oracle`.
+
+## Train/serve skew — scoring one cascade in isolation
+
+The agent's `classify_virality_model` tool scored a cascade by featurising that
+one root. Author reuse — the strongest feature by gain — and the co-author
+features are defined against the cascades that ran in the trailing window, so
+featurised alone they all read zero: a value the model only ever saw on the
+first few cascades of its training data. Nothing errored.
+
+5-fold CV on the training split, each validation fold scored with
+features computed in context (as in training) and in isolation (as the tool
+did):
+
+| model | ROC-AUC in context | ROC-AUC alone | macro F1 in context | macro F1 alone |
+|---|---|---|---|---|
+| original | 0.929 | 0.874 | 0.863 | 0.787 |
+| upgraded | 0.946 | 0.915 | 0.895 | 0.797 |
+
+`score_cascade` now featurises the root together with every cascade active in
+the window before it, which reproduces the batch features exactly (checked on
+database cascades). The batch evaluation numbers were never affected — only
+what the agent saw.
+
+Reproduce with `python -m ml.experiment skew`.
