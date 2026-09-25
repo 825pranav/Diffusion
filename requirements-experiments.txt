@@ -1,0 +1,8 @@
+# Model-comparison experiments (python -m ml.experiment). Not needed to run the
+# pipeline or the test suite. Install on top of requirements.txt:
+#
+#   pip install -r requirements-experiments.txt --extra-index-url https://download.pytorch.org/whl/cpu
+#
+# The GNN baseline is plain PyTorch and runs on CPU; no CUDA build is required.
+optuna==5.0.0
+torch==2.14.0

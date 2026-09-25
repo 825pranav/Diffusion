@@ -61,15 +61,29 @@ LGBM_PARAMS = dict(
     verbose=-1,
 )
 
+# Hyperparameters chosen by `python -m ml.experiment tune` (Optuna, training
+# split only). Used when present; LGBM_PARAMS above stays as the original,
+# untuned configuration that the experiments compare against.
+TUNED_PARAMS_PATH = REPO_ROOT / "ml" / "tuned_params.json"
+
 log = logging.getLogger(__name__)
+
+
+def model_params() -> dict:
+    """The params the shipped model trains with: tuned if available, else the defaults."""
+    if TUNED_PARAMS_PATH.exists():
+        tuned = json.loads(TUNED_PARAMS_PATH.read_text(encoding="utf-8"))["params"]
+        return {**tuned, "verbose": -1}
+    return dict(LGBM_PARAMS)
 
 
 def cross_validate(X: pd.DataFrame, y: np.ndarray, seed: int) -> pd.DataFrame:
     """Stratified k-fold CV. Returns one row of metrics per fold."""
     folds = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=seed)
+    params = model_params()
     rows = []
     for fold, (train_idx, valid_idx) in enumerate(folds.split(X, y), start=1):
-        model = LGBMClassifier(random_state=seed, **LGBM_PARAMS)
+        model = LGBMClassifier(random_state=seed, **params)
         model.fit(X.iloc[train_idx], y[train_idx])
 
         proba = model.predict_proba(X.iloc[valid_idx])[:, 1]
@@ -115,8 +129,13 @@ def _write_report(cv: pd.DataFrame, importance: pd.DataFrame, n_train: int, n_te
         [r.feature, f"{r.gain:,.0f}", f"{100 * r.share:.1f}%"] for r in top.itertuples()
     ]
 
+    tuned = (
+        "hyperparameters tuned by Optuna on the training split "
+        "(`ml/tuned_params.json`)" if TUNED_PARAMS_PATH.exists() else "default hyperparameters"
+    )
     body = f"""
-LightGBM, positive class = `coordinated`. {N_FOLDS}-fold stratified
+LightGBM with {len(FEATURE_COLUMNS)} features and {tuned}, positive class =
+`coordinated`. {N_FOLDS}-fold stratified
 cross-validation on the training split only ({n_train} cascades); {n_test}
 cascades are held out for `ml/evaluate.py` and never seen here.
 
@@ -145,7 +164,7 @@ async def main_async(labels_path: pathlib.Path, seed: int) -> None:
         cv["roc_auc"].mean(), cv["precision"].mean(), cv["recall"].mean(),
     )
 
-    model = LGBMClassifier(random_state=seed, **LGBM_PARAMS)
+    model = LGBMClassifier(random_state=seed, **model_params())
     model.fit(X, y)
 
     importance = _importance_frame(model)
@@ -162,7 +181,7 @@ async def main_async(labels_path: pathlib.Path, seed: int) -> None:
                 "n_test_holdout": int(len(test)),
                 "cv_f1_mean": float(cv["f1"].mean()),
                 "cv_roc_auc_mean": float(cv["roc_auc"].mean()),
-                "lgbm_params": LGBM_PARAMS,
+                "lgbm_params": model_params(),
                 "seed": seed,
             },
             indent=2,

@@ -62,6 +62,7 @@ def test_graphs_cover_every_post(cascades):
 
 
 def test_gnn_fits_and_predicts_probabilities(cascades):
+    pytest.importorskip("torch")  # experiments-only dependency, not in CI's pin set
     tree, authors = cascade_frames(cascades)
     graphs = build_graphs(tree, authors)
     ordered = [graphs[c.root_id] for c in cascades]
