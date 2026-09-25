@@ -5,6 +5,8 @@ Usage:
     python -m ml.experiment cv          # compare models by CV on the training split
     python -m ml.experiment shift       # robustness under simulator parameter shift
     python -m ml.experiment tune        # tune the shipped model's params (training split)
+    python -m ml.experiment oracle      # ceiling: a model given the true simulator params
+    python -m ml.experiment skew        # cost of featurising one cascade in isolation
     python -m ml.experiment holdout     # the single look at the 400 held-out cascades
 
 Every comparison in `cv` runs on the temporal *training* split only, with the
@@ -419,6 +421,124 @@ def run_tune(trials: int, seed: int) -> None:
     log.info("tuned params: %s", params)
 
 
+# ── how much signal exists at all ─────────────────────────────────────────────
+
+ORACLE_PARAMS = [
+    "param_root_attach", "param_delay_median_s", "param_delay_sigma",
+    "param_bot_frac", "param_hop_prob", "param_hop_lag_s",
+]
+
+
+def run_oracle(seed: int) -> None:
+    """
+    Cross-validate a classifier that reads the simulator's true parameters.
+
+    This leaks the generating process on purpose. No feature computed from an
+    observed cascade can carry more information than the parameters that
+    produced it, so this is a ceiling: where the oracle fails, the classes
+    genuinely overlap and no feature engineering will recover the difference.
+    """
+    from ml.dataset import DEFAULT_LABELS
+
+    labels = pd.read_csv(DEFAULT_LABELS, parse_dates=["t0"])
+    labels["y"] = (labels["label"] == "coordinated").astype(int)
+    train, _ = temporal_split(labels)
+    y, subtype = train["y"].to_numpy(), train["subtype"].to_numpy()
+    folds = RepeatedStratifiedKFold(n_splits=N_SPLITS, n_repeats=N_REPEATS, random_state=seed)
+    p = np.zeros(len(train))
+    per_fold = []
+    for tr, va in folds.split(train, y):
+        model = lgbm(BASE_LGBM_PARAMS, seed).fit(train[ORACLE_PARAMS].iloc[tr], y[tr])
+        pv = model.predict_proba(train[ORACLE_PARAMS].iloc[va])[:, 1]
+        per_fold.append(score(y[va], pv, subtype[va]))
+        p[va] = pv
+    m = pd.DataFrame(per_fold).mean()
+    rows = [[k, f"{m[k]:.3f}"] for k in ("macro_f1", "roc_auc", "acc_plain",
+                                         "acc_viral_organic", "acc_stealth_coordinated")]
+    log.info("oracle: %s", m.round(3).to_dict())
+    body = f"""
+A LightGBM given each cascade's **true generating parameters** (root attachment,
+delay median and spread, bot share, hop probability and lag) instead of
+anything observed, cross-validated on the training split exactly like the arms
+above. This deliberately leaks the simulator: nothing measured from a cascade
+can carry more information than the parameters that produced it, so these
+numbers are a ceiling.
+
+{markdown_table(["metric (CV mean)", "oracle"], rows)}
+
+Where the oracle fails, the two classes overlap by construction: a stealth
+campaign's parameters are drawn from ranges that organic cascades also occupy,
+and no feature engineering can separate what the generator made identical.
+
+Reproduce with `python -m ml.experiment oracle`.
+"""
+    upsert_section("Classifier ceiling — oracle on true simulator parameters", body)
+
+
+# ── train/serve skew in single-cascade scoring ───────────────────────────────
+
+
+def run_skew(seed: int) -> None:
+    """
+    What scoring a cascade in isolation did to the agent's model tool.
+
+    `ml.predict.score_cascade` used to featurise the one root it was asked
+    about. The reuse and co-author features are defined against the cascades
+    in the preceding window, so in isolation every one of them read zero. Here
+    each validation fold is scored twice — with features computed in context,
+    as in training, and with each cascade featurised alone, as the tool did.
+    """
+    from ml.features import compute_features
+    from ml.train import model_params
+
+    cascades = simulate(2000, "medium", 42)
+    tree, authors = cascade_frames(cascades)
+    data = build_dataset(cascades)
+    train, _ = temporal_split(data)
+    by_tree = dict(tuple(tree.groupby("root_id")))
+    by_author = dict(tuple(authors.groupby("root_id")))
+    alone = (
+        pd.concat([compute_features(by_tree[r], by_author[r]) for r in train["root_node_id"]])
+        .set_index("root_node_id").loc[train["root_node_id"]].reset_index()
+    )
+    y = train["y"].to_numpy()
+    rows = []
+    for name, cols, params in (("original", BASE_FEATURE_COLUMNS, BASE_LGBM_PARAMS),
+                               ("upgraded", FEATURE_COLUMNS, model_params())):
+        ctx, iso = [], []
+        for tr, va in StratifiedKFold(N_SPLITS, shuffle=True, random_state=seed).split(train, y):
+            model = lgbm(params, seed).fit(train[cols].iloc[tr], y[tr])
+            ctx.append(score(y[va], model.predict_proba(train[cols].iloc[va])[:, 1]))
+            iso.append(score(y[va], model.predict_proba(alone[cols].iloc[va])[:, 1]))
+        c, i = pd.DataFrame(ctx).mean(), pd.DataFrame(iso).mean()
+        rows.append([name, f"{c['roc_auc']:.3f}", f"{i['roc_auc']:.3f}",
+                     f"{c['macro_f1']:.3f}", f"{i['macro_f1']:.3f}"])
+        log.info("skew %s: context auc=%.3f alone auc=%.3f", name, c["roc_auc"], i["roc_auc"])
+
+    body = f"""
+The agent's `classify_virality_model` tool scored a cascade by featurising that
+one root. Author reuse — the strongest feature by gain — and the co-author
+features are defined against the cascades that ran in the trailing window, so
+featurised alone they all read zero: a value the model only ever saw on the
+first few cascades of its training data. Nothing errored.
+
+{N_SPLITS}-fold CV on the training split, each validation fold scored with
+features computed in context (as in training) and in isolation (as the tool
+did):
+
+{markdown_table(["model", "ROC-AUC in context", "ROC-AUC alone", "macro F1 in context",
+                 "macro F1 alone"], rows)}
+
+`score_cascade` now featurises the root together with every cascade active in
+the window before it, which reproduces the batch features exactly (checked on
+database cascades). The batch evaluation numbers were never affected — only
+what the agent saw.
+
+Reproduce with `python -m ml.experiment skew`.
+"""
+    upsert_section("Train/serve skew — scoring one cascade in isolation", body)
+
+
 # ── the one look at the holdout ───────────────────────────────────────────────
 
 
@@ -528,7 +648,7 @@ Reproduce with `python -m ml.experiment holdout`.
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Classifier experiments")
-    parser.add_argument("command", choices=["cv", "tune", "shift", "holdout"])
+    parser.add_argument("command", choices=["cv", "tune", "shift", "oracle", "skew", "holdout"])
     parser.add_argument("--trials", type=int, default=DEFAULT_TRIALS)
     parser.add_argument("--gnn-epochs", type=int, default=30)
     parser.add_argument("--seed", type=int, default=42)
@@ -545,6 +665,10 @@ def main() -> None:
         run_tune(args.trials * 2, args.seed)
     elif args.command == "shift":
         run_shift(args.seed, args.gnn_epochs)
+    elif args.command == "skew":
+        run_skew(args.seed)
+    elif args.command == "oracle":
+        run_oracle(args.seed)
     elif args.command == "holdout":
         asyncio.run(run_holdout(args.seed))
 
