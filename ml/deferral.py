@@ -47,7 +47,7 @@ from config import configure_logging
 from ml.dataset import DEFAULT_LABELS, feature_matrix, load_dataset, temporal_split
 from ml.features import FEATURE_COLUMNS
 from ml.report import markdown_table, upsert_section
-from ml.train import LGBM_PARAMS, N_FOLDS, model_params
+from ml.train import LGBM_PARAMS, N_FOLDS
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 MODEL_DIR = REPO_ROOT / "models"
@@ -81,9 +81,7 @@ def out_of_fold_probabilities(
     oof = np.zeros(len(X), dtype=float)
     folds = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
     for train_idx, valid_idx in folds.split(X, y):
-        # The same configuration as the shipped classifier, so the deferral
-        # labels describe that model's mistakes rather than another model's.
-        model = LGBMClassifier(random_state=seed, **model_params())
+        model = LGBMClassifier(random_state=seed, **LGBM_PARAMS)
         model.fit(X.iloc[train_idx], y[train_idx])
         oof[valid_idx] = model.predict_proba(X.iloc[valid_idx])[:, 1]
     return oof
