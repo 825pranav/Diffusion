@@ -58,9 +58,9 @@ SWEEP_GRIDS = {
     "ewma": [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0],
     "poisson": [2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0],
     "negbin": [2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0],
-    "cusum": [2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0],
+    "cusum": [2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0, 20.0, 25.0],
 }
-# Operating point of the currently shipped detector, the reference every other
+# Operating point of the previous default detector, the reference every other
 # baseline is matched against.
 REFERENCE = ("robust", 2.5)
 
@@ -274,7 +274,7 @@ def run_sweep(
         for r, f in zip(all_points, front, strict=True)
     ]
 
-    runs = [(f"`{REFERENCE[0]}` @ {REFERENCE[1]:g} (shipped)", REFERENCE)]
+    runs = [(f"`{REFERENCE[0]}` @ {REFERENCE[1]:g} (previous default)", REFERENCE)]
     runs += [
         (f"`{b}` @ {c['threshold']:g} (tuned)", (b, c["threshold"]))
         for b, c in chosen.items()
@@ -293,6 +293,13 @@ def run_sweep(
             ]
         )
 
+    missing = [b for b in sweeps if b not in chosen]
+    missing_note = (
+        "\n\nNo threshold in the grid reaches that recall for "
+        + ", ".join(f"`{b}`" for b in missing)
+        + "; left out of the table below."
+        if missing else ""
+    )
     sampling = (
         "Each topic is scored on every arriving event, exactly as "
         "`processing.consumer` does in production — so the history a baseline "
@@ -310,9 +317,9 @@ table above), and the chosen operating points are then scored on
 **{len(test)} different topics** that none of the choices saw.
 
 Selection rule: the fewest false alarms per topic-day among thresholds whose
-coordinated recall on the tuning topics reaches the shipped detector's
+coordinated recall on the tuning topics reaches the previous default's
 (`{REFERENCE[0]}` at {REFERENCE[1]:g}: {target:.3f}). That holds recall fixed and
-asks which detector pays the least noise for it.
+asks which detector pays the least noise for it.{missing_note}
 
 ### Held-out topics, at the tuned thresholds
 
@@ -394,7 +401,7 @@ STRESS_CLUMPS = (0.0, 1.0, 3.0)
 
 def run_stress(chosen: dict[str, float], test_topics: list[str], tick: int) -> None:
     """Score the tuned operating points, unchanged, on clumpier chatter."""
-    runs = [(f"`{REFERENCE[0]}` @ {REFERENCE[1]:g} (shipped)", REFERENCE)]
+    runs = [(f"`{REFERENCE[0]}` @ {REFERENCE[1]:g} (previous default)", REFERENCE)]
     runs += [(f"`{b}` @ {t:g}", (b, t)) for b, t in chosen.items() if (b, t) != REFERENCE]
     rows = []
     for clump in STRESS_CLUMPS:

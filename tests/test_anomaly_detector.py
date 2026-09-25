@@ -192,3 +192,18 @@ def test_negbin_is_less_alarmed_by_clumpy_history_than_poisson():
         detector = AnomalyDetector(baseline=baseline, min_samples=5, threshold=0.0)
         z[baseline] = _feed_counts(detector, clumpy + [7])[-1].z_score
     assert z["negbin"] < z["poisson"]
+
+
+def test_every_baseline_has_a_default_threshold():
+    from processing.anomaly_detector import _BASELINES, DEFAULT_THRESHOLDS
+
+    assert set(DEFAULT_THRESHOLDS) == set(_BASELINES)
+
+
+def test_default_threshold_follows_the_baseline(monkeypatch):
+    import processing.anomaly_detector as ad
+
+    monkeypatch.setattr(ad, "ANOMALY_THRESHOLD", None)
+    assert ad.AnomalyDetector(baseline="cusum", threshold=None)._threshold == 12.0
+    assert ad.AnomalyDetector(baseline="robust", threshold=None)._threshold == 2.5
+    assert ad.AnomalyDetector(baseline="cusum", threshold=4.0)._threshold == 4.0

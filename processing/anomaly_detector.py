@@ -49,12 +49,35 @@ import asyncpg
 
 from processing.velocity_scorer import VelocityScore
 
-ANOMALY_THRESHOLD = float(os.getenv("ANOMALY_Z_THRESHOLD", "2.5"))
 HISTORY_SIZE = int(os.getenv("ANOMALY_HISTORY_SIZE", "60"))
 MIN_SAMPLES = int(os.getenv("ANOMALY_MIN_SAMPLES", "5"))
 
 # Which baseline a sample is scored against; see the module docstring.
-BASELINE = os.getenv("ANOMALY_BASELINE", "robust")
+#
+# CUSUM is the default because it is the one measured to beat the previous
+# default (robust) on every axis that was tested, in the regime production
+# actually runs — one sample per arriving event. On 150 replayed topics none of
+# its settings were chosen on, it caught more campaigns (0.846 vs 0.832
+# recall) with 0.08 false alarms per topic-day against 1.35, and it stayed
+# ahead when the background chatter was made overdispersed. It costs about
+# twenty seconds of median detection delay. See `python -m ml.eval_anomaly
+# --sweep --tick 0` and docs/results.md.
+BASELINE = os.getenv("ANOMALY_BASELINE", "cusum")
+
+# Default operating point per baseline, used unless ANOMALY_Z_THRESHOLD is set.
+# The thresholds are not interchangeable: CUSUM's is on an accumulated sum,
+# and each was chosen separately for per-event scoring. The z-scale baselines
+# keep their historical 2.5.
+DEFAULT_THRESHOLDS = {
+    "zscore": 2.5,
+    "robust": 2.5,
+    "ewma": 2.5,
+    "poisson": 3.0,
+    "negbin": 2.5,
+    "cusum": 12.0,
+}
+_THRESHOLD_ENV = os.getenv("ANOMALY_Z_THRESHOLD")
+ANOMALY_THRESHOLD: float | None = float(_THRESHOLD_ENV) if _THRESHOLD_ENV else None
 
 # Smoothing factor for the EWMA baseline — roughly a 20-sample memory.
 EWMA_ALPHA = float(os.getenv("ANOMALY_EWMA_ALPHA", "0.1"))
@@ -174,7 +197,7 @@ class AnomalyDetector:
 
     def __init__(
         self,
-        threshold: float = ANOMALY_THRESHOLD,
+        threshold: float | None = ANOMALY_THRESHOLD,
         history_size: int = HISTORY_SIZE,
         min_samples: int = MIN_SAMPLES,
         baseline: str = BASELINE,
@@ -183,7 +206,8 @@ class AnomalyDetector:
             raise ValueError(
                 f"unknown baseline {baseline!r}; expected one of {sorted(_BASELINES)}"
             )
-        self._threshold = threshold
+        # An explicit threshold wins; otherwise the baseline's own default.
+        self._threshold = threshold if threshold is not None else DEFAULT_THRESHOLDS[baseline]
         self._history_size = history_size
         self._min_samples = min_samples
         self._baseline = baseline
