@@ -48,7 +48,21 @@ ATTRIBUTION_WINDOW_SECONDS = 3600
 # Topics replayed by default. Each carries ~10 cascades, which is plenty.
 DEFAULT_TOPICS = 50
 
-BASELINES = ("zscore", "robust", "ewma")
+BASELINES = ("zscore", "robust", "ewma", "poisson", "negbin", "cusum")
+
+# Threshold grids for the sweep. CUSUM's threshold is on the accumulated sum,
+# so it has its own scale.
+SWEEP_GRIDS = {
+    "zscore": [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0],
+    "robust": [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0],
+    "ewma": [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0],
+    "poisson": [2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0],
+    "negbin": [2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0],
+    "cusum": [2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0],
+}
+# Operating point of the currently shipped detector, the reference every other
+# baseline is matched against.
+REFERENCE = ("robust", 2.5)
 
 log = logging.getLogger(__name__)
 
@@ -97,7 +111,12 @@ def replay_topic(
     detector = AnomalyDetector(baseline=baseline, threshold=threshold)
 
     start, end = float(events[0]), float(events[-1])
-    ticks = np.arange(start, end + tick_seconds, tick_seconds, dtype=float)
+    if tick_seconds > 0:
+        ticks = np.arange(start, end + tick_seconds, tick_seconds, dtype=float)
+    else:
+        # Per-event scoring, as processing.consumer does: one sample on every
+        # arriving event rather than on a clock.
+        ticks = events
 
     detections: list[float] = []
     cursor = 0
@@ -175,6 +194,242 @@ def score_baseline(
     }
 
 
+def pareto_front(points: list[tuple[float, float]]) -> list[bool]:
+    """
+    Which (false alarms, recall) points no other point beats on both axes.
+
+    A point is dominated when another has no more false alarms and at least the
+    recall, and is strictly better on one of the two.
+    """
+    flags = []
+    for i, (fp_i, r_i) in enumerate(points):
+        dominated = any(
+            fp_j <= fp_i and r_j >= r_i and (fp_j < fp_i or r_j > r_i)
+            for j, (fp_j, r_j) in enumerate(points)
+            if j != i
+        )
+        flags.append(not dominated)
+    return flags
+
+
+def choose_threshold(sweep: list[dict], min_recall: float) -> dict | None:
+    """The fewest-false-alarm threshold whose coordinated recall reaches `min_recall`."""
+    ok = [r for r in sweep if r["coordinated_recall"] >= min_recall]
+    return min(ok, key=lambda r: (r["fp_per_topic_day"], -r["coordinated_recall"])) if ok else None
+
+
+def _regime(tick: int) -> str:
+    """Section suffix naming how the stream was sampled."""
+    return "per event, as deployed" if tick <= 0 else f"{tick}s clock ticks"
+
+
+def _fmt_delay(r: dict) -> str:
+    return "n/a" if np.isnan(r["median_delay_min"]) else f"{r['median_delay_min']:.1f}"
+
+
+def run_sweep(
+    streams: dict[str, np.ndarray],
+    onsets: pd.DataFrame,
+    tune_topics: list[str],
+    test_topics: list[str],
+    tick: int,
+) -> None:
+    """
+    Sweep thresholds on one set of topics, then report on a disjoint set.
+
+    Picking thresholds and reporting results on the same topics would flatter
+    whichever detector has the most knobs, so the choice is made on the tuning
+    topics and every number in the headline table comes from topics the choice
+    never saw.
+    """
+    tune = {t: streams[t] for t in tune_topics if t in streams}
+    test = {t: streams[t] for t in test_topics if t in streams}
+
+    sweeps: dict[str, list[dict]] = {}
+    for baseline, grid in SWEEP_GRIDS.items():
+        sweeps[baseline] = []
+        for threshold in grid:
+            r = score_baseline(tune, onsets, baseline, tick, threshold)
+            r.update(baseline=baseline, threshold=threshold)
+            sweeps[baseline].append(r)
+
+    ref = next(r for r in sweeps[REFERENCE[0]] if r["threshold"] == REFERENCE[1])
+    target = ref["coordinated_recall"]
+
+    chosen: dict[str, dict] = {}
+    for baseline, sweep in sweeps.items():
+        pick = choose_threshold(sweep, target)
+        if pick is not None:
+            chosen[baseline] = pick
+        log.info("%-7s tuned threshold: %s", baseline, pick and pick["threshold"])
+
+    all_points = [r for s in sweeps.values() for r in s]
+    front = pareto_front([(r["fp_per_topic_day"], r["coordinated_recall"]) for r in all_points])
+    sweep_rows = [
+        [
+            f"`{r['baseline']}`", f"{r['threshold']:g}",
+            f"{r['coordinated_recall']:.3f}", f"{r['fp_per_topic_day']:.2f}",
+            _fmt_delay(r), "yes" if f else "",
+        ]
+        for r, f in zip(all_points, front, strict=True)
+    ]
+
+    runs = [(f"`{REFERENCE[0]}` @ {REFERENCE[1]:g} (shipped)", REFERENCE)]
+    runs += [
+        (f"`{b}` @ {c['threshold']:g} (tuned)", (b, c["threshold"]))
+        for b, c in chosen.items()
+        if (b, c["threshold"]) != REFERENCE
+    ]
+    test_rows = []
+    for label, (baseline, threshold) in runs:
+        r = score_baseline(test, onsets, baseline, tick, threshold)
+        log.info("test %-28s recall=%.3f fp/topic-day=%.2f", label, r["coordinated_recall"],
+                 r["fp_per_topic_day"])
+        test_rows.append(
+            [
+                label, f"{r['detections']:,}", f"{r['coordinated_recall']:.3f}",
+                f"{r['organic_recall']:.3f}", f"{r['false_positive_rate']:.3f}",
+                f"{r['fp_per_topic_day']:.2f}", _fmt_delay(r),
+            ]
+        )
+
+    sampling = (
+        "Each topic is scored on every arriving event, exactly as "
+        "`processing.consumer` does in production — so the history a baseline "
+        "is built from is a history of event-time samples, not of a clock."
+        if tick <= 0 else
+        f"Each topic is scored on a {tick}s clock, like the fixed-threshold table."
+    )
+    body = f"""
+{sampling}
+
+The fixed-threshold table fixes every detector at 2.5, which is not a fair
+fight: each baseline's z-scale means something different. Here each one is
+swept, its threshold is chosen on **{len(tune)} tuning topics** (the ones in the
+table above), and the chosen operating points are then scored on
+**{len(test)} different topics** that none of the choices saw.
+
+Selection rule: the fewest false alarms per topic-day among thresholds whose
+coordinated recall on the tuning topics reaches the shipped detector's
+(`{REFERENCE[0]}` at {REFERENCE[1]:g}: {target:.3f}). That holds recall fixed and
+asks which detector pays the least noise for it.
+
+### Held-out topics, at the tuned thresholds
+
+{markdown_table(
+    ["detector", "detections", "coord. recall", "organic recall", "FP rate",
+     "FP / topic-day", "median delay (min)"],
+    test_rows,
+)}
+
+### Tuning-topic sweep
+
+`pareto` marks points that no other detector/threshold beats on both false
+alarms and coordinated recall.
+
+{markdown_table(
+    ["baseline", "threshold", "coord. recall", "FP / topic-day", "median delay (min)", "pareto"],
+    sweep_rows,
+)}
+
+Reproduce with `python -m ml.eval_anomaly --sweep --tick {tick}`.
+"""
+    upsert_section(f"Anomaly baselines — tuned on held-out topics ({_regime(tick)})", body)
+    return {b: c["threshold"] for b, c in chosen.items()}
+
+
+def offline_streams(
+    clump_mean: float, seed: int = 42, clump_seed: int = 1
+) -> tuple[dict[str, np.ndarray], pd.DataFrame]:
+    """
+    Rebuild the replay streams in memory, optionally with clustered chatter.
+
+    With `clump_mean=0` this regenerates exactly the mention streams the
+    database holds (same rng sequence as `simulation.generate`). A positive
+    value gives every background mention a Poisson number of echoes a minute or
+    two later — ordinary conversation that clumps without being a cascade.
+
+    The simulator's background is a pure Poisson process, which is precisely
+    the assumption the `poisson` detector makes; a detector evaluated only in
+    the world it assumes is being flattered. Clumped chatter is overdispersed,
+    which is what real mention counts look like.
+    """
+    from simulation.background import generate_background
+    from simulation.cascade import CascadeSimulator
+
+    rng = np.random.default_rng(seed)
+    sim = CascadeSimulator(rng=rng, run_id=f"m{seed}", difficulty="medium")
+    labels = ["organic"] * 1000 + ["coordinated"] * 1000
+    rng.shuffle(labels)
+    cascades = [sim.generate(label) for label in labels]
+    topic_ids = sorted({c.topic_id for c in cascades})
+    _, bg_edges = generate_background(
+        rng=rng, run_id=f"m{seed}", topic_ids=topic_ids, window_days=sim.window_days,
+        end_time=max(c.t0 for c in cascades),
+    )
+
+    events: dict[str, list[float]] = {t: [] for t in topic_ids}
+    for c in cascades:
+        for e in c.edges:
+            if e.edge_type == "mentions":
+                events[e.target_id].append(e.ts.timestamp())
+    clump_rng = np.random.default_rng(clump_seed)
+    for e in bg_edges:
+        t = e.ts.timestamp()
+        events[e.target_id].append(t)
+        if clump_mean > 0:
+            for _ in range(int(clump_rng.poisson(clump_mean))):
+                events[e.target_id].append(t + float(clump_rng.exponential(90.0)))
+
+    streams = {t: np.sort(np.array(v, dtype=float)) for t, v in events.items() if v}
+    onsets = pd.DataFrame(
+        {"topic_id": [c.topic_id for c in cascades], "label": [c.label for c in cascades],
+         "epoch": [c.t0.timestamp() for c in cascades]}
+    )
+    return streams, onsets
+
+
+STRESS_CLUMPS = (0.0, 1.0, 3.0)
+
+
+def run_stress(chosen: dict[str, float], test_topics: list[str], tick: int) -> None:
+    """Score the tuned operating points, unchanged, on clumpier chatter."""
+    runs = [(f"`{REFERENCE[0]}` @ {REFERENCE[1]:g} (shipped)", REFERENCE)]
+    runs += [(f"`{b}` @ {t:g}", (b, t)) for b, t in chosen.items() if (b, t) != REFERENCE]
+    rows = []
+    for clump in STRESS_CLUMPS:
+        streams, onsets = offline_streams(clump)
+        test = {t: streams[t] for t in test_topics if t in streams}
+        for label, (baseline, threshold) in runs:
+            r = score_baseline(test, onsets, baseline, tick, threshold)
+            log.info("stress clump=%.0f %-24s recall=%.3f fp/topic-day=%.2f",
+                     clump, label, r["coordinated_recall"], r["fp_per_topic_day"])
+            rows.append([
+                f"{clump:g}", label, f"{r['coordinated_recall']:.3f}",
+                f"{r['organic_recall']:.3f}", f"{r['fp_per_topic_day']:.2f}", _fmt_delay(r),
+            ])
+    body = f"""
+The simulator's background chatter is a pure (diurnal) Poisson process — which
+is exactly what the `poisson` detector assumes. A detector scored only in the
+world it assumes is being flattered, so here the thresholds tuned above are
+kept **unchanged** and re-scored on the same {len(test_topics)} held-out topics
+with overdispersed chatter: every background mention gets a Poisson(`clumps`)
+number of echoes about a minute and a half later. That is ordinary
+conversation that clumps without being a cascade, and it is what real mention
+counts look like. `clumps = 0` regenerates the database streams in memory and
+reproduces the held-out table above.
+
+{markdown_table(
+    ["clumps", "detector", "coord. recall", "organic recall", "FP / topic-day",
+     "median delay (min)"],
+    rows,
+)}
+
+Reproduce with `python -m ml.eval_anomaly --sweep --tick {tick}`.
+"""
+    upsert_section(f"Anomaly baselines — clumped-chatter stress test ({_regime(tick)})", body)
+
+
 def _write_report(results: dict[str, dict[str, float]], tick: int, n_topics: int) -> None:
     rows = [
         [
@@ -211,9 +466,27 @@ Reproduce with `python -m ml.eval_anomaly`.
     upsert_section("Anomaly baselines — replay comparison", body)
 
 
-async def main_async(labels_path: pathlib.Path, n_topics: int, tick: int, threshold: float) -> None:
+async def main_async(
+    labels_path: pathlib.Path, n_topics: int, tick: int, threshold: float, sweep: bool = False
+) -> None:
     labels = pd.read_csv(labels_path, parse_dates=["t0"])
     labels["epoch"] = to_epoch_seconds(labels["t0"])
+
+    if sweep:
+        # Tune on the topics the fixed-threshold table reports, test on the rest.
+        all_topics = sorted(labels["topic_id"].unique())
+        tune_topics, test_topics = all_topics[:n_topics], all_topics[n_topics:]
+        conn = await asyncpg.connect(DB_URL)
+        try:
+            streams = await load_topic_streams(conn, all_topics)
+        finally:
+            await conn.close()
+        chosen = run_sweep(
+            streams, labels[["topic_id", "label", "epoch"]], tune_topics, test_topics, tick
+        )
+        run_stress(chosen, test_topics, tick)
+        log.info("wrote results to docs/results.md")
+        return
 
     topic_ids = sorted(labels["topic_id"].unique())[:n_topics]
     onsets = labels[labels["topic_id"].isin(topic_ids)][["topic_id", "label", "epoch"]]
@@ -244,12 +517,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Compare anomaly-detection baselines")
     parser.add_argument("--labels", type=pathlib.Path, default=DEFAULT_LABELS)
     parser.add_argument("--topics", type=int, default=DEFAULT_TOPICS)
-    parser.add_argument("--tick", type=int, default=DEFAULT_TICK_SECONDS)
+    parser.add_argument(
+        "--tick", type=int, default=DEFAULT_TICK_SECONDS,
+        help="seconds between samples; 0 scores on every event, as the consumer does",
+    )
     parser.add_argument("--threshold", type=float, default=2.5)
+    parser.add_argument(
+        "--sweep", action="store_true",
+        help="sweep thresholds on the first --topics topics, report on the remainder",
+    )
     args = parser.parse_args()
 
     configure_logging()
-    asyncio.run(main_async(args.labels, args.topics, args.tick, args.threshold))
+    asyncio.run(main_async(args.labels, args.topics, args.tick, args.threshold, args.sweep))
 
 
 if __name__ == "__main__":
