@@ -273,7 +273,8 @@ SHIFTS: list[tuple[Shift, str]] = [
     (Shift("all-stealth", hard_frac=1.0,
            notes="every cascade is its confusable subtype"), "medium"),
     (Shift("camouflaged", coord_delay_mult=2.5, coord_sigma_add=0.4, coord_bot_mult=0.6,
-           coord_attach_mult=0.6, notes="all of the above at once, milder"), "medium"),
+           coord_attach_mult=0.6,
+           notes="delays x2.5, sigma +0.4, bot share x0.6, root attachment x0.6"), "medium"),
 ]
 
 
@@ -332,11 +333,14 @@ seed 42) and then scored on 2,000 fresh cascades from a *perturbed* simulator
 (seed {SHIFT_SEED}). Every perturbation makes coordinated cascades look more like
 organic ones in one specific way. Cells are **ROC-AUC / macro F1**.
 
-The last column adds domain randomisation: 2,000 extra training cascades drawn
-from simulators with randomly perturbed campaign parameters. For every row the
-augmentation **leaves out the family of shift being tested** (e.g. the
-"slower campaigns" row is scored by a model that never saw slowed-down
-campaigns), so the column measures transfer to an unseen kind of shift.
+The last column adds domain randomisation: 400 extra training cascades from
+each of six simulators with one randomly perturbed campaign parameter
+(delay, delay spread, bot share, root attachment, bot pool size, confusable
+share). For every single-family row the augmentation **leaves that family
+out** (the "slower campaigns" row is scored by a model that never saw
+slowed-down campaigns), so the column measures transfer to an unseen kind of
+shift. The in-distribution and combined "camouflaged" rows use all six
+families — the camouflaged row is therefore *not* a held-out-family test.
 
 {markdown_table(headers, rows)}
 

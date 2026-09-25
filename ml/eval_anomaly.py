@@ -313,7 +313,7 @@ def run_sweep(
 The fixed-threshold table fixes every detector at 2.5, which is not a fair
 fight: each baseline's z-scale means something different. Here each one is
 swept, its threshold is chosen on **{len(tune)} tuning topics** (the ones in the
-table above), and the chosen operating points are then scored on
+fixed-threshold replay table), and the chosen operating points are then scored on
 **{len(test)} different topics** that none of the choices saw.
 
 Selection rule: the fewest false alarms per topic-day among thresholds whose
@@ -424,7 +424,7 @@ with overdispersed chatter: every background mention gets a Poisson(`clumps`)
 number of echoes about a minute and a half later. That is ordinary
 conversation that clumps without being a cascade, and it is what real mention
 counts look like. `clumps = 0` regenerates the database streams in memory and
-reproduces the held-out table above.
+reproduces the matching held-out table (up to float rounding).
 
 {markdown_table(
     ["clumps", "detector", "coord. recall", "organic recall", "FP / topic-day",
