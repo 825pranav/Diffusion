@@ -17,6 +17,7 @@ from api.websocket import graph_delta_listener
 from api.websocket import router as ws_router
 from config import DB_URL, configure_logging
 from graph import embeddings
+from graph.models import ensure_schema
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 
@@ -32,6 +33,7 @@ def _make_emit(anomaly_id: int):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.db = await asyncpg.create_pool(DB_URL, min_size=2, max_size=10)
+    await ensure_schema(app.state.db)
     app.state.http = aiohttp.ClientSession()
     delta_task = asyncio.create_task(graph_delta_listener())
     agent_task = asyncio.create_task(agent_listener(emit_factory=_make_emit))

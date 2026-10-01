@@ -24,7 +24,9 @@ services:
     volumes:
       - kafkadata:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:29092", "--list"]
+      # The PLAINTEXT listener binds to the `kafka` hostname, not loopback, so
+      # probing localhost:29092 never connects and the check never passes.
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "kafka:29092", "--list"]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -41,6 +43,8 @@ services:
       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic mastodon-raw --partitions 3 --replication-factor 1
       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic hn-raw --partitions 3 --replication-factor 1
       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic gh-raw --partitions 3 --replication-factor 1
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic entity-mentions --partitions 3 --replication-factor 1
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic dead-letter --partitions 1 --replication-factor 1
       echo 'Topics created.'
       "
     restart: "no"

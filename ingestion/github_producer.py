@@ -6,7 +6,6 @@ PushEvent) and publishes them to the `gh-raw` Kafka topic.
 """
 
 import asyncio
-import json
 import logging
 import os
 from datetime import UTC, datetime
@@ -14,8 +13,8 @@ from datetime import UTC, datetime
 import aiohttp
 from aiokafka import AIOKafkaProducer
 
-from config import KAFKA_BROKER, configure_logging
-from ingestion.utils import BoundedSeenSet
+from config import configure_logging
+from ingestion.utils import BoundedSeenSet, make_producer, publish
 
 TOPIC = "gh-raw"
 GH_TOKEN = os.getenv("GITHUB_TOKEN", "")
@@ -65,8 +64,7 @@ async def produce(
             continue
         if event["id"] in seen:
             continue
-        payload = json.dumps(_serialize_event(event)).encode()
-        await producer.send_and_wait(TOPIC, payload)
+        await publish(producer, TOPIC, _serialize_event(event))
         seen.add(event["id"])
         published += 1
 
@@ -74,7 +72,7 @@ async def produce(
         log.info("published %d new GitHub events", published)
 
 async def main() -> None:
-    producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BROKER)
+    producer = make_producer()
     await producer.start()
     seen: BoundedSeenSet = BoundedSeenSet()
     try:

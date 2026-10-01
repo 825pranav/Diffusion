@@ -163,3 +163,21 @@ async def init_schema(conn) -> None:
     """Run all DDL statements against an open asyncpg connection."""
     for stmt in _DDL_STATEMENTS:
         await conn.execute(stmt)
+
+
+# Arbitrary, fixed key for the advisory lock that serialises schema creation.
+_SCHEMA_LOCK_KEY = 0x0D1FF051
+
+
+async def ensure_schema(pool) -> None:
+    """
+    Create the schema if it is missing; safe to call from every service at startup.
+
+    The DDL is idempotent, but not concurrency-safe: three processors starting
+    together would race on CREATE OR REPLACE FUNCTION and the trigger swaps,
+    and Postgres answers that with "tuple concurrently updated". A transaction
+    -scoped advisory lock lets one service run it while the rest wait.
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock($1)", _SCHEMA_LOCK_KEY)
+        await init_schema(conn)

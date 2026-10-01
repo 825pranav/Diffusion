@@ -6,7 +6,6 @@ them to the `hn-raw` Kafka topic.
 """
 
 import asyncio
-import json
 import logging
 import os
 from datetime import UTC, datetime
@@ -14,8 +13,8 @@ from datetime import UTC, datetime
 import aiohttp
 from aiokafka import AIOKafkaProducer
 
-from config import KAFKA_BROKER, configure_logging
-from ingestion.utils import BoundedSeenSet
+from config import configure_logging
+from ingestion.utils import BoundedSeenSet, make_producer, publish
 
 TOPIC = "hn-raw"
 HN_BASE = "https://hacker-news.firebaseio.com/v0"
@@ -96,7 +95,7 @@ async def produce(session: aiohttp.ClientSession, producer: AIOKafkaProducer, se
             seen.add(item_id)
             continue
         if item:
-            await producer.send_and_wait(TOPIC, json.dumps(item).encode())
+            await publish(producer, TOPIC, item)
             published += 1
         seen.add(item_id)
 
@@ -104,7 +103,7 @@ async def produce(session: aiohttp.ClientSession, producer: AIOKafkaProducer, se
         log.info("published %d new HN items (stories and comments)", published)
 
 async def main() -> None:
-    producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BROKER)
+    producer = make_producer()
     await producer.start()
     seen: BoundedSeenSet = BoundedSeenSet()
     try:

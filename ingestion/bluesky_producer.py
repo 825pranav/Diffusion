@@ -16,7 +16,8 @@ from datetime import UTC, datetime
 import aiohttp
 from aiokafka import AIOKafkaProducer
 
-from config import KAFKA_BROKER, configure_logging
+from config import configure_logging
+from ingestion.utils import make_producer, publish
 
 TOPIC = "bluesky-raw"
 
@@ -118,14 +119,14 @@ async def stream(producer: AIOKafkaProducer) -> None:
                             continue
                         record = _serialize(data)
                         if record:
-                            await producer.send_and_wait(TOPIC, json.dumps(record).encode())
+                            await publish(producer, TOPIC, record)
             except Exception:
                 log.exception("Jetstream disconnected, retrying in %ds", RECONNECT_DELAY)
                 await asyncio.sleep(RECONNECT_DELAY)
 
 
 async def main() -> None:
-    producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BROKER)
+    producer = make_producer()
     await producer.start()
     try:
         await stream(producer)

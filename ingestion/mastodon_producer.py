@@ -2,13 +2,14 @@
 Mastodon async Kafka producer.
 
 Polls the public timeline of a Mastodon instance and publishes new
-statuses to the `mastodon-raw` Kafka topic. No auth required.
+statuses to the `mastodon-raw` Kafka topic.
 
-Default instance: mastodon.social — override with MASTODON_INSTANCE env var.
+Instances are closing their public timelines to anonymous readers one by one,
+so the default is whichever still serves it, and MASTODON_ACCESS_TOKEN (any
+account's token with read:statuses) works on instances that do not.
 """
 
 import asyncio
-import json
 import logging
 import os
 import re
@@ -17,16 +18,19 @@ from datetime import UTC, datetime
 import aiohttp
 from aiokafka import AIOKafkaProducer
 
-from config import KAFKA_BROKER, configure_logging
-from ingestion.utils import BoundedSeenSet
+from config import configure_logging
+from ingestion.utils import BoundedSeenSet, make_producer, publish
 
 TOPIC = "mastodon-raw"
-# mastodon.social now returns 422 "This method requires an authenticated user"
-# on the public timeline, so it cannot be the default any more. mstdn.social,
-# fosstodon.org and hachyderm.io still serve it anonymously.
-MASTODON_INSTANCE = os.getenv("MASTODON_INSTANCE", "https://mstdn.social")
+# mastodon.social returns 422 "This method requires an authenticated user" on
+# the public timeline, and since 2026-10 so does mstdn.social, the previous
+# default. hachyderm.io and fosstodon.org still serve it anonymously.
+MASTODON_INSTANCE = os.getenv("MASTODON_INSTANCE", "https://hachyderm.io")
+MASTODON_ACCESS_TOKEN = os.getenv("MASTODON_ACCESS_TOKEN", "")
 POLL_INTERVAL = int(os.getenv("MASTODON_POLL_INTERVAL", "30"))  # seconds
 BATCH_SIZE = int(os.getenv("MASTODON_BATCH_SIZE", "40"))        # max per poll
+
+_HEADERS = {"Authorization": f"Bearer {MASTODON_ACCESS_TOKEN}"} if MASTODON_ACCESS_TOKEN else {}
 
 _TAG_RE = re.compile(r"<[^>]+>")
 
@@ -94,25 +98,37 @@ async def produce(session: aiohttp.ClientSession, producer: AIOKafkaProducer, se
     url = f"{MASTODON_INSTANCE}/api/v1/timelines/public"
     params = {"limit": BATCH_SIZE, "local": "false"}
     try:
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+        async with session.get(url, params=params, headers=_HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status in (401, 422):
+                log.error(
+                    "%s requires authentication for its public timeline: set "
+                    "MASTODON_ACCESS_TOKEN or point MASTODON_INSTANCE elsewhere",
+                    MASTODON_INSTANCE,
+                )
+                return
             resp.raise_for_status()
             statuses = await resp.json()
     except Exception:
         log.exception("failed to fetch Mastodon public timeline")
         return
 
-    fresh = [s for s in statuses if s["id"] not in seen]
-    for status in fresh:
+    published = 0
+    for status in statuses:
+        if status["id"] in seen:
+            continue
         record = _serialize(status)
         if _should_publish(record):
-            await producer.send_and_wait(TOPIC, json.dumps(record).encode())
+            await publish(producer, TOPIC, record)
+            published += 1
         seen.add(status["id"])
 
-    log.info("published %d new statuses from %s", len(fresh), MASTODON_INSTANCE)
+    # Counted on publish, not on arrival: textless, parentless statuses are
+    # dropped above and used to be reported as published anyway.
+    log.info("published %d new statuses from %s", published, MASTODON_INSTANCE)
 
 
 async def main() -> None:
-    producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BROKER)
+    producer = make_producer()
     await producer.start()
     seen: BoundedSeenSet = BoundedSeenSet()
     try:
