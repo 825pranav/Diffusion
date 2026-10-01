@@ -157,6 +157,73 @@ async def get_propagation_path(
     return [dict(r) for r in rows]
 
 
+async def get_entity_activity(
+    conn, entity_id: str, window_minutes: int = 60, top: int = 5
+) -> dict[str, Any]:
+    """
+    What lies behind an entity's mention spike: who posted and where it spread.
+
+    Anomalies fire on entities and repos, but every other query walks outward
+    from a node, and an entity has no outgoing edges — posts point *at* it — so
+    an investigation of a real anomaly used to find nothing at all. This looks
+    the other way: the posts that mentioned the entity in the window ending at
+    its latest mention, the accounts that wrote them, and the reshare cascade
+    each post sits in (walked up to its root).
+    """
+    row = await conn.fetchrow(
+        """
+        WITH RECURSIVE recent AS (
+            SELECT source_id AS content_id
+            FROM graph_edges
+            WHERE target_id = $1 AND edge_type = 'mentions'
+              AND ts >= (SELECT max(ts) FROM graph_edges
+                         WHERE target_id = $1 AND edge_type = 'mentions')
+                        - make_interval(mins => $2)
+        ),
+        authors AS (
+            SELECT a.source_id AS author_id, count(*) AS n
+            FROM recent r
+            JOIN graph_edges a ON a.target_id = r.content_id AND a.edge_type = 'authored'
+            GROUP BY a.source_id
+        ),
+        up AS (
+            SELECT content_id AS origin, content_id AS node_id, 0 AS depth FROM recent
+            UNION ALL
+            SELECT u.origin, e.source_id, u.depth + 1
+            FROM up u
+            JOIN graph_edges e ON e.target_id = u.node_id AND e.edge_type = 'reshare'
+            WHERE u.depth < 20
+        ),
+        roots AS (
+            SELECT DISTINCT ON (origin) origin, node_id AS root_id
+            FROM up ORDER BY origin, depth DESC
+        ),
+        cascades AS (
+            SELECT root_id, count(*) AS mentions FROM roots GROUP BY root_id
+        )
+        SELECT
+            (SELECT count(*) FROM recent) AS mentions,
+            (SELECT count(*) FROM authors) AS distinct_authors,
+            (SELECT coalesce(max(n), 0) FROM authors) AS top_author_mentions,
+            (SELECT count(*) FROM cascades) AS distinct_cascades,
+            (SELECT coalesce(json_agg(c ORDER BY c.mentions DESC, c.root_id), '[]'::json)
+             FROM (SELECT * FROM cascades ORDER BY mentions DESC, root_id LIMIT $3) c)
+                AS top_cascades
+        """,
+        entity_id, window_minutes, top,
+    )
+    mentions = row["mentions"]
+    return {
+        "window_minutes": window_minutes,
+        "mentions": mentions,
+        "distinct_authors": row["distinct_authors"],
+        "top_author_share": round(row["top_author_mentions"] / mentions, 3) if mentions else 0.0,
+        "distinct_cascades": row["distinct_cascades"],
+        "top_cascades": json.loads(row["top_cascades"]) if isinstance(row["top_cascades"], str)
+        else row["top_cascades"],
+    }
+
+
 async def get_node_degree(conn, node_id: str) -> dict[str, int]:
     row = await conn.fetchrow(
         """

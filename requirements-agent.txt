@@ -6,13 +6,14 @@
 # installed separately and numpy is restored afterwards. The agent runs
 # correctly on numpy 2 despite the declared pin.
 #
-# Held at 0.10.x deliberately: ReActAgent.from_tools, which agent/agent.py is
-# built on, is gone by 0.13 — 0.12 is the last line that still has it, and its
-# Groq/Ollama adapters are no longer published for that core version.
+# llama-index now supplies only FunctionTool, which turns the tool functions
+# into JSON schemas. The tool-calling loop talks to Groq and Ollama directly
+# through their OpenAI-compatible endpoints with the openai client: the 0.10
+# Groq adapter's tool path imports a package that was never installed, and the
+# Ollama adapter has no async tool calls at all.
 #
 #   pip install -r requirements-agent.txt
 #   pip install -r requirements.txt
 #
 llama-index-core==0.10.52
-llama-index-llms-groq==0.1.4
-llama-index-llms-ollama==0.2.2
+openai==2.54.0

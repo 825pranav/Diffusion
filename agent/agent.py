@@ -1,12 +1,12 @@
 """
-LlamaIndex ReAct agent for anomaly investigation.
+LlamaIndex tool-calling agent for anomaly investigation.
 
 Wakes via PostgreSQL LISTEN/NOTIFY on 'anomaly_detected', with a periodic
 backlog sweep behind it so anomalies raised while the agent was unavailable are
 still investigated rather than silently dropped.
 
 For each anomaly event the agent:
-  1. Runs a bounded ReAct loop with the investigation tools
+  1. Runs a bounded tool-calling loop with the investigation tools
   2. Applies the confidence gate (< threshold → needs_review, withheld from feed)
   3. Scores the output with Ragas
   4. Writes a structured case file to PostgreSQL
@@ -29,8 +29,7 @@ from datetime import UTC, datetime
 
 import aiohttp
 import asyncpg
-from llama_index.core.agent import ReActAgent
-from llama_index.core.llms import LLM
+from openai import AsyncOpenAI, BadRequestError
 
 from agent.confidence import apply_gate
 from agent.evaluator import evaluate_case
@@ -42,6 +41,8 @@ from graph.models import ANOMALY_NOTIFY_CHANNEL
 from graph.queries import get_uninvestigated_anomalies, mark_anomaly_investigated
 
 MAX_AGENT_STEPS = int(os.getenv("AGENT_MAX_STEPS", "12"))
+# Ceiling on confidence when no tool found anything about the node.
+NO_EVIDENCE_CONFIDENCE = 0.3
 OLLAMA_REQUEST_TIMEOUT = 120.0   # seconds before Ollama inference is abandoned
 GROQ_RATE_LIMIT_SLEEP = 5        # seconds to wait between investigations to avoid 429s
 
@@ -56,25 +57,47 @@ GROQ_PROBE_TIMEOUT = 10  # seconds to decide whether Groq is usable
 # Cloudflare fronts the Groq API and 403s urllib's default agent (error 1010).
 GROQ_USER_AGENT = "diffusion-agent/0.1 (+https://github.com/825pranav/diffusion)"
 
-# Inference backend, resolved once on first use.
-_llm: LLM | None = None
+# Which backend to use: "groq", "ollama", or "auto" (Groq when its key works).
+LLM_BACKEND = os.getenv("LLM_BACKEND", "auto").lower()
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+
+# Inference backend, resolved once on first use: an OpenAI-compatible client and
+# the model name to send. Groq and Ollama both serve /v1/chat/completions with
+# native tool calls, so one loop drives either.
+_llm: tuple[AsyncOpenAI, str] | None = None
 
 log = logging.getLogger(__name__)
 
 _INVESTIGATION_PROMPT = (
     "You are an intelligence analyst investigating how a trending topic spread online.\n"
-    "Gather evidence with the available tools. classify_virality_model is the "
-    "strongest single piece of evidence when it is available — weigh it above raw "
-    "counts, but do not ignore what the other tools show.\n"
-    "Call each tool at most once, then answer. Do not repeat a tool call you have "
-    "already made.\n"
-    "After your investigation respond with ONLY a JSON object in this exact format:\n"
+    "Gather evidence with the available tools. Anomalies usually fire on a topic "
+    "node (an id starting 'entity:' or 'github:repo:'); for those, start with "
+    "get_entity_activity to see who produced the mentions. classify_virality_model "
+    "is the strongest single piece of evidence when it is available — weigh it "
+    "above raw counts, but do not ignore what the other tools show.\n"
+    "Call each tool at most once. Do not repeat a tool call you have already made.\n"
+    "When you have the evidence, call submit_verdict with your verdict. If you "
+    "cannot call it, reply with ONLY a JSON object in this exact format:\n"
     "{\n"
     '  "classification": "organic" | "coordinated_amplification" | "uncertain",\n'
     '  "confidence": <float 0.0-1.0>,\n'
     '  "signals": ["signal 1", "signal 2"],\n'
     '  "reasoning_steps": ["step 1", "step 2"]\n'
     "}"
+)
+
+
+_UNKNOWN_TOOL = (
+    "That tool does not exist. Use only the tools listed, and call submit_verdict "
+    "to answer."
+)
+_GATHER_FIRST = (
+    "You have not gathered any evidence yet. Call the tools first, then answer."
+)
+_ANSWER_NOW = (
+    "You have all the evidence the tools can give. Call submit_verdict now. If "
+    "the tools found little or nothing, say "
+    '"uncertain" with a low confidence rather than guessing.'
 )
 
 
@@ -117,13 +140,13 @@ def _groq_model_available(api_key: str, model: str) -> bool:
     return True
 
 
-def _build_llm() -> LLM:
+def _build_llm() -> tuple[AsyncOpenAI, str]:
     """
     Select the inference backend once per process and cache it.
 
-    Groq is preferred when usable; otherwise the local Ollama model. Rebuilding
-    per investigation would repeat the probe and construct a fresh client every
-    time the agent wakes.
+    LLM_BACKEND=auto prefers Groq when the key works and serves the model, and
+    otherwise uses the local Ollama model. Rebuilding per investigation would
+    repeat the probe and construct a fresh client every time the agent wakes.
     """
     global _llm
     if _llm is not None:
@@ -131,27 +154,132 @@ def _build_llm() -> LLM:
 
     groq_key = os.getenv("GROQ_API_KEY", "")
     groq_model = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL)
-    if groq_key and _groq_model_available(groq_key, groq_model):
-        from llama_index.llms.groq import Groq
-
+    if LLM_BACKEND == "groq" or (
+        LLM_BACKEND == "auto" and groq_key and _groq_model_available(groq_key, groq_model)
+    ):
         log.info("LLM: Groq (%s)", groq_model)
-        _llm = Groq(model=groq_model, api_key=groq_key)
+        # The free tier allows 8,000 tokens a minute, about one investigation;
+        # the client honours Groq's retry-after on a 429, so let it wait rather
+        # than fail the investigation.
+        _llm = (AsyncOpenAI(base_url=GROQ_API_BASE, api_key=groq_key, max_retries=8), groq_model)
         return _llm
 
-    from llama_index.llms.ollama import Ollama
-
-    chat_model = os.getenv("OLLAMA_CHAT_MODEL", "llama3.2")
+    chat_model = os.getenv("OLLAMA_CHAT_MODEL", "qwen2.5:7b")
     log.info("LLM: Ollama (%s)", chat_model)
-    _llm = Ollama(
-        model=chat_model,
-        base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
-        request_timeout=OLLAMA_REQUEST_TIMEOUT,
+    _llm = (
+        AsyncOpenAI(base_url=f"{OLLAMA_URL}/v1", api_key="ollama", timeout=OLLAMA_REQUEST_TIMEOUT),
+        chat_model,
     )
     return _llm
 
 
+def use_backend(name: str) -> str:
+    """Pin the backend for this process ("groq" or "ollama"); returns the model name."""
+    global _llm, LLM_BACKEND
+    _llm, LLM_BACKEND = None, name
+    return _build_llm()[1]
+
+
+async def _tool_loop(tools: list, query: str) -> str:
+    """
+    Drive one investigation through native tool calls; return the final answer.
+
+    The model asks for a tool through the API, the tool runs against the graph,
+    and its output goes back as a `tool` message — so every number the model
+    can cite came from a tool, not from text it wrote in a tool's place.
+    """
+    client, model = _build_llm()
+    specs = [t.metadata.to_openai_tool() for t in tools] + [_VERDICT_TOOL]
+    by_name = {t.metadata.name: t for t in tools}
+    messages: list[dict] = [
+        {"role": "system", "content": _INVESTIGATION_PROMPT},
+        {"role": "user", "content": query},
+    ]
+    called: set[str] = set()
+    told_to_answer = False
+    for step in range(MAX_AGENT_STEPS):
+        # Once every tool has run there is nothing left to learn, and near the
+        # step limit there is no room to: tell the model to answer. Without
+        # this, a node whose tools all come back empty kept the model calling
+        # them until the limit. The tools stay on offer — gpt-oss on Groq calls
+        # one anyway when none are listed, and the API rejects that with a 400.
+        if not told_to_answer and (called >= by_name.keys() or step >= MAX_AGENT_STEPS - 2):
+            messages.append({"role": "user", "content": _ANSWER_NOW})
+            told_to_answer = True
+        try:
+            response = await client.chat.completions.create(
+                model=model, messages=messages, tools=specs, tool_choice="auto", temperature=0
+            )
+        except BadRequestError as exc:
+            # Groq validates tool calls server-side and rejects the whole
+            # request when the model names a tool that does not exist (gpt-oss
+            # reaches for built-ins it was trained with). Point it back at the
+            # real tools instead of losing the investigation.
+            if "tool_use_failed" not in str(exc):
+                raise
+            messages.append({"role": "user", "content": _UNKNOWN_TOOL})
+            continue
+        message = response.choices[0].message
+        if not message.tool_calls:
+            if called:
+                return message.content or ""
+            # An answer before any evidence is a guess; send it back once.
+            messages.append({"role": "assistant", "content": message.content or ""})
+            messages.append({"role": "user", "content": _GATHER_FIRST})
+            continue
+        messages.append({
+            "role": "assistant",
+            "content": message.content or "",
+            "tool_calls": [call.model_dump() for call in message.tool_calls],
+        })
+        for call in message.tool_calls:
+            name = call.function.name
+            tool = by_name.get(name)
+            if name == "submit_verdict":
+                if called:
+                    return call.function.arguments or ""
+                output = "rejected: no evidence yet. Call the evidence tools first."
+            elif name in called:
+                output = "already called; use the result above"
+            else:
+                try:
+                    args = json.loads(call.function.arguments or "{}")
+                    output = (await tool.acall(**args)).content if tool else f"no tool named {name}"
+                    if tool:
+                        called.add(name)
+                except Exception as exc:
+                    # Not marked as called: the model gets the error and can
+                    # retry with corrected arguments.
+                    output = f"tool error: {type(exc).__name__}: {exc}"
+            messages.append({"role": "tool", "tool_call_id": call.id, "content": output})
+    raise ValueError(f"no answer within {MAX_AGENT_STEPS} steps")
+
+
 _REQUIRED_KEYS = {"classification", "confidence", "signals", "reasoning_steps"}
 _VALID_CLASSIFICATIONS = {"organic", "coordinated_amplification", "uncertain"}
+
+# The verdict is itself a tool call. gpt-oss on Groq, told to answer in JSON
+# while tools are on offer, "calls" a tool named json that does not exist, and
+# Groq rejects the request outright; a real tool with the verdict's schema gives
+# it a legitimate way to answer, and gives every model structured output instead
+# of free text to parse.
+_VERDICT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_verdict",
+        "description": "Submit the final verdict once the evidence is in.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "classification": {"type": "string", "enum": sorted(_VALID_CLASSIFICATIONS)},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "signals": {"type": "array", "items": {"type": "string"}},
+                "reasoning_steps": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": sorted(_REQUIRED_KEYS),
+        },
+    },
+}
 
 
 def _parse_agent_response(raw: str) -> dict:
@@ -163,7 +291,9 @@ def _parse_agent_response(raw: str) -> dict:
     Returns a dict with all four keys coerced to their expected types so
     the caller never needs defensive .get() with defaults.
     """
-    text = raw.strip()
+    # Reasoning models (qwen3 through Ollama) can lead with a <think> block,
+    # whose braces would otherwise be mistaken for the start of the answer.
+    text = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
 
     # Prefer a fenced block (```json ... ``` or ``` ... ```)
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
@@ -201,27 +331,58 @@ async def run_investigation(
     include_model_tool: bool = True,
 ) -> dict:
     """
-    Run one bounded ReAct investigation and return the parsed verdict.
+    Run one bounded tool-calling investigation and return the parsed verdict.
 
     Reasoning only — no database writes and no case file. Separated from
     investigate() so ml/evaluate.py can score the agent over a held-out set
     without persisting hundreds of evaluation runs as real case files, and so
     the model tool can be withheld to measure the LLM on its own.
 
-    Raises if the agent produces no parseable verdict; callers decide what that
-    means.
+    Raises if the agent produces no parseable verdict, or reaches one without a
+    single tool result behind it; callers decide what that means.
+
+    Tools are called natively, through the API's function-calling interface,
+    not through the text ReAct format this used to rely on. That format needs
+    the model to write "Thought:/Action:" lines while the prompt demands a bare
+    JSON answer; every backend tested resolved the conflict by answering at
+    once, so no tool ever ran and each verdict — "coordinated at 0.95" on a
+    node with no edges at all — was invented. gpt-oss on Groq went further and
+    wrote its own "Observation:" lines.
     """
-    tools = build_tools(conn, session, emit=emit, include_model_tool=include_model_tool)
-    agent = ReActAgent.from_tools(
-        tools, llm=_build_llm(), max_iterations=MAX_AGENT_STEPS, verbose=False
-    )
+    executed: list[str] = []
+    found: list[bool] = []
+
+    async def record(event: dict | None) -> None:
+        if event and event.get("type") == "tool_result":
+            executed.append(f"{event['tool']}: {event['summary']}")
+            # Similar past trends describe other nodes, not this one.
+            if event["tool"] != "search_similar_trends":
+                found.append(not event.get("empty", False))
+        if emit:
+            await emit(event)
+
+    tools = build_tools(conn, session, emit=record, include_model_tool=include_model_tool)
     query = (
-        f"{_INVESTIGATION_PROMPT}\n\n"
         f"Investigate node '{node_id}' on platform '{platform}'. "
         f"Z-score: {z_score:.2f}, velocity: {velocity:.2f}."
     )
-    response = await agent.aquery(query)
-    return _parse_agent_response(str(response))
+    response = await _tool_loop(tools, query)
+    if not executed:
+        raise UngroundedVerdict("the model answered without calling any tool")
+    result = _parse_agent_response(response)
+    if not any(found):
+        # Every evidence tool came back empty. The models still answer —
+        # qwen2.5 said "organic at 0.85" about a node with no edges — so the
+        # verdict is held at uncertain, below the review gate.
+        result["classification"] = "uncertain"
+        result["confidence"] = min(result["confidence"], NO_EVIDENCE_CONFIDENCE)
+        result["signals"] = ["the tools found no graph evidence for this node", *result["signals"]]
+    result["evidence"] = executed
+    return result
+
+
+class UngroundedVerdict(ValueError):
+    """The model returned a verdict with no tool result behind it."""
 
 
 async def investigate(
