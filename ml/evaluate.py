@@ -45,7 +45,7 @@ from sklearn.metrics import (  # noqa: E402
     roc_auc_score,
 )
 
-from agent.agent import run_investigation  # noqa: E402
+from agent.agent import _build_llm, run_investigation, use_backend  # noqa: E402
 from config import DB_URL, configure_logging  # noqa: E402
 from ml.dataset import DEFAULT_LABELS, feature_matrix, load_dataset, temporal_split  # noqa: E402
 from ml.predict import load_model  # noqa: E402
@@ -68,6 +68,18 @@ DEFAULT_LLM_SAMPLE = 24
 DEFAULT_LLM_REPEATS = 3
 # Pause between investigations, to stay inside hosted rate limits.
 DEFAULT_LLM_DELAY = 1.5
+
+# Interpretation of the LLM rows, written against the measured table.
+LLM_FINDINGS = """
+**The LLM rows this section used to carry are withdrawn.** They were measured
+with an agent that never called a tool: the prompt demanded a bare JSON answer,
+which beat the ReAct format, and every tool advertised its parameters as `args`
+and `kwargs`, so the "LLM" arms measured unguided guessing. With the agent fixed,
+two 24-cascade runs of local `qwen2.5:7b` without the classifier tool got 13 and
+then 9 right — chance, so the coarse conclusion stands — and one run with the
+tool got 17 of 21. Groq's free tier (8,000 tokens a minute) did not allow a full
+run. Re-measure both with `python -m ml.evaluate --backends ollama,groq`.
+"""
 
 log = logging.getLogger(__name__)
 
@@ -355,16 +367,7 @@ Investigations that returned no parseable verdict: {failure_note}. They are
 excluded rather than counted as wrong — each arm is measured on the answers it
 actually gives, and the count is reported so the omission stays visible.
 
-**The LLM arms are underpowered and should not be ranked against each other.**
-Each rests on fewer than twenty verdicts, and repeated runs move them further
-than the gap between them: across two runs of the same sample the `llm` arm
-scored ROC-AUC 0.602 and then 0.424, a swing of nearly 0.2 on an arm that never
-touches the classifier and so should not have changed at all. Sampling noise is
-larger than the effect. What the numbers do support is the coarse conclusion —
-a local 7B reasoning over graph structure is somewhere around chance at this
-task, and nowhere near the classifier's 0.938. Separating "LLM alone" from
-"LLM with the model tool" needs a stronger model and a sample in the hundreds,
-which is a rate-limit and runtime problem rather than a design one.
+{LLM_FINDINGS}
 
 ### By cascade subtype
 
@@ -446,6 +449,7 @@ async def main_async(
     seed: int,
     llm_delay: float = DEFAULT_LLM_DELAY,
     llm_repeats: int = DEFAULT_LLM_REPEATS,
+    backends: tuple[str, ...] = ("auto",),
 ) -> None:
     model = load_model()
     if model is None:
@@ -467,17 +471,20 @@ async def main_async(
             "running LLM arms: %d repeats x %d cascades per arm (this is slow)",
             llm_repeats, llm_sample,
         )
-        for name, include_model in (("llm", False), ("hybrid", True)):
-            per_repeat, y, p, failed = await repeated_llm_arm(
-                holdout, llm_sample, include_model, name, llm_repeats, seed, llm_delay
-            )
-            failures[name] = failed
-            if len(y):
-                results[name] = arm_metrics(y, p)
-                spreads[name] = per_repeat
-                arms_for_plot[name] = (y, p)
-            else:
-                log.warning("[%s] produced no usable verdicts at all", name)
+        for backend in backends:
+            model_name = _build_llm()[1] if backend == "auto" else use_backend(backend)
+            for kind, include_model in (("llm", False), ("hybrid", True)):
+                name = f"{kind} · {model_name}"
+                per_repeat, y, p, failed = await repeated_llm_arm(
+                    holdout, llm_sample, include_model, name, llm_repeats, seed, llm_delay
+                )
+                failures[name] = failed
+                if len(y):
+                    results[name] = arm_metrics(y, p)
+                    spreads[name] = per_repeat
+                    arms_for_plot[name] = (y, p)
+                else:
+                    log.warning("[%s] produced no usable verdicts at all", name)
 
     plot_reliability(arms_for_plot, DIAGRAM_PATH)
     log.info("wrote reliability diagram to %s", DIAGRAM_PATH)
@@ -524,6 +531,11 @@ def main() -> None:
         default=DEFAULT_LLM_DELAY,
         help="seconds between investigations, to stay inside hosted rate limits",
     )
+    parser.add_argument(
+        "--backends",
+        default="auto",
+        help="comma-separated LLM backends to compare: groq, ollama, or auto",
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -531,7 +543,7 @@ def main() -> None:
     asyncio.run(
         main_async(
             args.labels, args.llm_sample, args.skip_llm, args.seed,
-            args.llm_delay, args.llm_repeats,
+            args.llm_delay, args.llm_repeats, tuple(args.backends.split(",")),
         )
     )
 

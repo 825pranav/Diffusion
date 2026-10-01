@@ -236,9 +236,16 @@ async def _tool_loop(tools: list, query: str) -> str:
             name = call.function.name
             tool = by_name.get(name)
             if name == "submit_verdict":
-                if called:
-                    return call.function.arguments or ""
-                output = "rejected: no evidence yet. Call the evidence tools first."
+                if not called:
+                    output = "rejected: no evidence yet. Call the evidence tools first."
+                else:
+                    # Checked here, so a malformed verdict costs a retry rather
+                    # than the investigation: qwen2.5 lost 3 of 24 that way.
+                    try:
+                        _parse_agent_response(call.function.arguments or "")
+                        return call.function.arguments
+                    except (ValueError, TypeError, KeyError) as exc:
+                        output = f"rejected: {exc}. Call submit_verdict again with valid arguments."
             elif name in called:
                 output = "already called; use the result above"
             else:
@@ -272,7 +279,17 @@ _VERDICT_TOOL = {
             "type": "object",
             "properties": {
                 "classification": {"type": "string", "enum": sorted(_VALID_CLASSIFICATIONS)},
-                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    # qwen2.5 reported p_coordinated here: "coordinated at
+                    # 0.07" for a cascade it believed organic.
+                    "description": (
+                        "How sure you are of the classification you chose: 0.5 is a "
+                        "coin flip, 1.0 is certain. Not the coordination probability."
+                    ),
+                },
                 "signals": {"type": "array", "items": {"type": "string"}},
                 "reasoning_steps": {"type": "array", "items": {"type": "string"}},
             },

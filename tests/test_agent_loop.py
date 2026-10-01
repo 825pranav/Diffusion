@@ -212,3 +212,19 @@ def test_a_verdict_on_no_evidence_is_held_at_uncertain(monkeypatch, empty):
         assert result["signals"][0].startswith("the tools found no graph evidence")
     else:
         assert (result["classification"], result["confidence"]) == ("organic", 0.85)
+
+
+def test_a_malformed_verdict_is_sent_back_for_another_try():
+    ran: list = []
+    broken = _call("submit_verdict", {}, "c2")
+    broken.function.arguments = '{"classification": "organic", confidence: 0.7}'  # not JSON
+    model = _ScriptedModel([
+        _reply(calls=[_call("classify_virality_model", {"node_id": "n"})]),
+        _reply(calls=[broken]),
+        _reply(calls=[_call("submit_verdict", json.loads(VERDICT), "c3")]),
+    ])
+    A._llm = (model, "m")
+    out = asyncio.run(A._tool_loop(_tools(ran), "investigate n"))
+    assert A._parse_agent_response(out)["classification"] == "organic"
+    retry_note = [m for m in model.requests[2]["messages"] if m["role"] == "tool"][-1]["content"]
+    assert retry_note.startswith("rejected")
