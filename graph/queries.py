@@ -34,23 +34,54 @@ async def upsert_node(conn, node_id: str, node_type: str, platform: str, label: 
     text if it happened to arrive second. Empty labels and placeholder metadata
     are therefore ignored on conflict, while last_seen still advances.
     """
-    await conn.execute(
-        """
-        INSERT INTO graph_nodes (id, type, platform, label, metadata)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (id, platform) DO UPDATE
-            SET label     = CASE
-                                WHEN EXCLUDED.label = '' THEN graph_nodes.label
-                                ELSE EXCLUDED.label
-                            END,
-                metadata  = CASE
-                                WHEN EXCLUDED.metadata ? 'placeholder' THEN graph_nodes.metadata
-                                ELSE EXCLUDED.metadata
-                            END,
-                last_seen = now()
-        """,
-        node_id, node_type, platform, label, json.dumps(metadata),
+    await conn.execute(_UPSERT_NODE, node_id, node_type, platform, label, json.dumps(metadata))
+
+
+async def upsert_nodes(conn, nodes: list[tuple[str, str, str, str, dict]]) -> None:
+    """
+    Batch form of upsert_node for (id, type, platform, label, metadata) rows.
+
+    Rows are written in key order. Two transactions that upsert overlapping
+    nodes in different orders can each hold a row the other is waiting for,
+    which Postgres resolves by aborting one; a shared order makes that cycle
+    impossible. The sort is stable, so a node's repeats keep arrival order.
+    """
+    rows = sorted(nodes, key=lambda n: (n[0], n[2]))
+    await conn.executemany(
+        _UPSERT_NODE, [(i, t, p, label, json.dumps(m)) for i, t, p, label, m in rows]
     )
+
+
+_UPSERT_NODE = """
+    INSERT INTO graph_nodes (id, type, platform, label, metadata)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (id, platform) DO UPDATE
+        SET label     = CASE
+                            WHEN EXCLUDED.label = '' THEN graph_nodes.label
+                            ELSE EXCLUDED.label
+                        END,
+            metadata  = CASE
+                            WHEN EXCLUDED.metadata ? 'placeholder' THEN graph_nodes.metadata
+                            ELSE EXCLUDED.metadata
+                        END,
+            last_seen = now()
+"""
+
+_INSERT_EDGE = """
+    INSERT INTO graph_edges (source_id, target_id, edge_type, platform, ts, weight)
+    VALUES ($1, $2, $3, $4, $5, $6)
+    ON CONFLICT (source_id, target_id, platform, ts) DO NOTHING
+"""
+
+
+def _edge_ts(ts: str | datetime | None) -> datetime:
+    # asyncpg requires a datetime object for timestamptz columns
+    if isinstance(ts, str):
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            return datetime.now(UTC)
+    return ts if ts is not None else datetime.now(UTC)
 
 
 async def insert_edge(
@@ -62,23 +93,20 @@ async def insert_edge(
     ts: str | datetime | None,
     weight: float = 1.0,
 ) -> None:
-    # asyncpg requires a datetime object for timestamptz columns
-    if isinstance(ts, str):
-        try:
-            ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
-            ts = datetime.now(UTC)
-    elif ts is None:
-        ts = datetime.now(UTC)
+    await conn.execute(_INSERT_EDGE, source_id, target_id, edge_type, platform, _edge_ts(ts), weight)
 
-    await conn.execute(
-        """
-        INSERT INTO graph_edges (source_id, target_id, edge_type, platform, ts, weight)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (source_id, target_id, platform, ts) DO NOTHING
-        """,
-        source_id, target_id, edge_type, platform, ts, weight,
-    )
+
+async def insert_edges(conn, edges: list[tuple[str, str, str, str, str | datetime | None, float]]) -> None:
+    """
+    Batch form of insert_edge for (source, target, type, platform, ts, weight) rows.
+
+    Sorted on the unique key for the same reason upsert_nodes sorts: concurrent
+    inserts of one key wait on each other, and a shared order keeps those waits
+    from forming a cycle.
+    """
+    rows = [(s, t, e, p, _edge_ts(ts), w) for s, t, e, p, ts, w in edges]
+    rows.sort(key=lambda r: (r[0], r[1], r[3], r[4]))
+    await conn.executemany(_INSERT_EDGE, rows)
 
 
 # ── reads ─────────────────────────────────────────────────────────────────────

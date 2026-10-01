@@ -29,6 +29,14 @@ DB_URL: str = os.getenv(
 
 KAFKA_BROKER: str = os.getenv("KAFKA_BROKER", "localhost:9092")
 
+# One raw topic per platform, written by the producers in ingestion/.
+RAW_TOPICS: list[str] = ["bluesky-raw", "mastodon-raw", "hn-raw", "gh-raw"]
+# Entity mentions re-keyed by entity id, so every mention of one entity reaches
+# the same scorer instance however many processors run in front of it.
+MENTIONS_TOPIC = "entity-mentions"
+# Records the processor could not write, with the error and their source offset.
+DEAD_LETTER_TOPIC = "dead-letter"
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"

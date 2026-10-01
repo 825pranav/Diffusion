@@ -229,3 +229,12 @@ def test_mastodon_boost_and_reply_create_reshare_edges():
         }
     )
     assert not any(e.edge_type == "reshare" for e in standalone.edges)
+
+
+def test_ner_junk_is_not_an_entity():
+    from processing.entity_extractor import is_plausible_entity
+
+    for junk in ["🐑🐑🐑🐑", "🤣", "mugshot.\nDammit", "https://bsky.app/profile/x", "www.example.com", "  ", "x" * 61]:
+        assert not is_plausible_entity(junk), junk
+    for name in ["AI", "U.S.", "New York", "GOP", "Fatboy Slim & Riva Starr", "東京"]:
+        assert is_plausible_entity(name), name

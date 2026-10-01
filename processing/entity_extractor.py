@@ -91,6 +91,30 @@ def is_ner_supported(langs: list[str] | None) -> bool:
     return any(lang.split("-")[0].lower() == "en" for lang in langs)
 
 
+_MAX_ENTITY_CHARS = 60
+
+
+def is_plausible_entity(text: str) -> bool:
+    """
+    Whether an NER span can be a real topic.
+
+    The small model tags whatever sits where a name might: runs of emoji
+    ("🐑🐑🐑…" as a PRODUCT), URLs, and spans that run across a line break into
+    the next sentence. On a 14-minute live capture these were 4.5% of all
+    entities, and the single loudest source of anomaly alerts was a string of
+    sheep emoji, so they are dropped here before they reach the graph.
+    """
+    text = text.strip()
+    return (
+        0 < len(text) <= _MAX_ENTITY_CHARS
+        and "\n" not in text
+        and "\r" not in text
+        and "://" not in text
+        and not text.lower().startswith("www.")
+        and any(ch.isalpha() for ch in text)
+    )
+
+
 def _ner_nodes_and_edges(
     text: str,
     source_id: str,
@@ -102,7 +126,7 @@ def _ner_nodes_and_edges(
     edges: list[Edge] = []
     seen: set[str] = set()
     for ent in _get_nlp()(text).ents:
-        if ent.label_ not in _NER_LABELS:
+        if ent.label_ not in _NER_LABELS or not is_plausible_entity(ent.text):
             continue
         ent_id = f"{ENTITY_PREFIX}{ent.label_.lower()}:{ent.text.lower().replace(' ', '_')}"
         if ent_id not in seen:

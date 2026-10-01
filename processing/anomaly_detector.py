@@ -185,14 +185,17 @@ class AnomalyDetector:
     """
     Velocity spike detector with Postgres NOTIFY integration.
 
-    The caller is responsible for providing a connection on each evaluate()
-    call — the detector holds no DB state of its own. detect() is the pure
-    half and needs no connection at all.
+    The caller is responsible for providing a connection on each store() or
+    evaluate() call — the detector holds no DB state of its own. detect() is
+    the pure half and needs no connection at all; processing/scorer.py calls it
+    per mention and stores the batch's events in one transaction.
 
     Usage:
         detector = AnomalyDetector()
-        async with pool.acquire() as conn:
-            event = await detector.evaluate(conn, velocity_score, platform="hn")
+        event = detector.detect(velocity_score, platform="hn")
+        if event:
+            async with pool.acquire() as conn:
+                await detector.store(conn, event)
     """
 
     def __init__(
@@ -222,24 +225,27 @@ class AnomalyDetector:
         )
         self._cusum: dict[str, float] = defaultdict(float)
 
-    async def _notify(self, conn: asyncpg.Connection, event: AnomalyEvent) -> None:
-        try:
-            # INSERT triggers trg_anomaly_notify which fires NOTIFY automatically
-            await conn.execute(
-                """
-                INSERT INTO anomaly_events (node_id, platform, z_score, velocity)
-                VALUES ($1, $2, $3, $4)
-                """,
-                event.entity_id, event.platform,
-                event.z_score, event.current_velocity,
-            )
-            log.info(
-                "anomaly inserted: entity=%s platform=%s z=%.2f velocity=%.2f",
-                event.entity_id, event.platform,
-                event.z_score, event.current_velocity,
-            )
-        except Exception:
-            log.exception("anomaly insert failed for entity %s", event.entity_id)
+    async def store(self, conn: asyncpg.Connection, event: AnomalyEvent) -> None:
+        """
+        Insert an anomaly; the INSERT fires trg_anomaly_notify, which wakes the agent.
+
+        Errors propagate. This runs inside the scorer's batch transaction, and a
+        swallowed failure would leave that transaction aborted, failing every
+        insert after it while the offsets still committed.
+        """
+        await conn.execute(
+            """
+            INSERT INTO anomaly_events (node_id, platform, z_score, velocity)
+            VALUES ($1, $2, $3, $4)
+            """,
+            event.entity_id, event.platform,
+            event.z_score, event.current_velocity,
+        )
+        log.info(
+            "anomaly inserted: entity=%s platform=%s z=%.2f velocity=%.2f",
+            event.entity_id, event.platform,
+            event.z_score, event.current_velocity,
+        )
 
     def _score_zscore(self, buf: deque[float], velocity: float) -> tuple[float, float, float] | None:
         """
@@ -424,5 +430,5 @@ class AnomalyDetector:
         """
         event = self.detect(score, platform)
         if event is not None:
-            await self._notify(conn, event)
+            await self.store(conn, event)
         return event

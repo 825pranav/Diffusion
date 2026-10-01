@@ -11,6 +11,7 @@ posts) are not tracked; only the topics they mention are.
 
 from __future__ import annotations
 
+import bisect
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -40,10 +41,23 @@ class VelocityScorer:
         self._buckets: dict[str, deque[float]] = defaultdict(deque)
 
     def record(self, entity_id: str, ts: float | None = None) -> VelocityScore:
-        """Record one event for entity_id and return its current velocity."""
+        """
+        Record one event for entity_id and return its current velocity.
+
+        Events may arrive slightly out of order — mentions of one entity come
+        from several processors, each with its own lag — so a late timestamp is
+        inserted in place rather than appended. Eviction pops from the left and
+        relies on the bucket staying sorted; an appended late event would sit
+        behind newer ones and never be evicted. The window is then measured
+        back from the newest event seen, not from the late one.
+        """
         now = ts if ts is not None else time.time()
         bucket = self._buckets[entity_id]
-        bucket.append(now)
+        if bucket and now < bucket[-1]:
+            bisect.insort(bucket, now)
+            now = bucket[-1]
+        else:
+            bucket.append(now)
         self._evict(bucket, now)
         return self._make_score(entity_id, bucket)
 
