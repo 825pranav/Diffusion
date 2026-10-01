@@ -185,7 +185,7 @@ async def main_async(min_size: int, limit: int, labels_path: pathlib.Path) -> No
         roots = [r["root_id"] for r in await conn.fetch(_ROOTS_SQL, f"{SIM_PREFIX}%", limit)]
         if not roots:
             raise SystemExit(
-                "no real cascades found — run: python -m scripts.ingest_live --minutes 20"
+                "no real cascades found — run the pipeline first (README: Run it)"
             )
         log.info("found %d candidate cascade roots in live data", len(roots))
 
@@ -217,10 +217,9 @@ async def main_async(min_size: int, limit: int, labels_path: pathlib.Path) -> No
         scored, p = score_distribution(model, real)
 
     body = f"""
-Live Bluesky and Hacker News traffic ingested through the real producer
-serialisation and `processing.consumer.handle()` — dedup, spaCy NER, graph
-writes, velocity scoring and anomaly detection — with Kafka omitted as transport
-(see `scripts/ingest_live.py`).
+Live traffic carried end to end by the production path: platform producers ->
+Kafka -> `processing.consumer` (dedup, spaCy NER, batched graph writes) ->
+`entity-mentions` -> `processing.scorer` (velocity and anomaly detection).
 
 ### What was ingested
 
@@ -279,7 +278,7 @@ firehose actually reveals.
 
 {example}
 
-Reproduce with `python -m scripts.ingest_live --minutes 20` then
+Reproduce by running the pipeline (README: Run it) for a while, then
 `python -m ml.analyze_real`.
 """
     upsert_section("Live traffic — observed cascades", body)

@@ -10,9 +10,6 @@ spacy==3.8.16
 
 # Database
 asyncpg==0.31.0
-# Embedded PostgreSQL 16 + pgvector, so local development needs no Docker.
-# See scripts/devdb.py.
-pgserver==0.1.4
 
 # Machine learning
 lightgbm==4.7.0

@@ -72,7 +72,8 @@ yarn-error.log*
 # Local session context (do not commit)
 context.txt
 frontend_prompt.md
-# Local embedded dev database (pgserver)
+# Data dir of the embedded pgserver database this repo used before the compose
+# stack ran; still ignored so a stale local copy is never committed.
 .pgdata/
 
 # Generated simulation datasets (reproducible from --seed)
