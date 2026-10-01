@@ -12,11 +12,13 @@
 | | |
 |---|---|
 | Coordinated-vs-organic classifier | macro F1 **0.910**, ROC-AUC **0.960** on 400 held-out cascades (up from 0.889 / 0.938; ΔAUC 95% CI +0.007 to +0.039) |
-| Against an LLM agent | a local 7B (Ollama `qwen2.5:7b`) reasoning over the same graph sits near chance (AUC 0.571, n=15); the original classifier reached 0.938 on the same split |
+| Against an LLM agent | with its tools actually working, a local 7B (`qwen2.5:7b`) reasoning over graph structure alone got 13 and 9 of 24 held-out cascades right — chance; given the classifier as a tool it got 17 of 21. Earlier LLM figures were measured with an agent that never called a tool and are withdrawn |
 | Against a graph neural network | a GIN over the raw reshare trees trails LightGBM on the same information (CV ROC-AUC 0.920 vs 0.948), though it holds up best on the two hardest simulator shifts (0.61 and 0.74 vs 0.55 and 0.73) |
 | Robustness | scored on 2,000 cascades from each of nine perturbed simulators: ROC-AUC holds at 0.92–0.95 under single-parameter shifts, drops to 0.73 under a combined camouflage shift, and to near chance (0.55) when every cascade is a confusable subtype |
 | Anomaly detection | per-event CUSUM over a Poisson count baseline: **0.08 false alarms per topic-day vs 1.35** for median/MAD at higher recall (0.846 vs 0.832), on 150 topics its threshold was not chosen on |
-| Filtered vector search | a partial HNSW index returns all 5 requested rows where a table-wide index returns under 3 |
+| Kafka pipeline | measured end to end on live traffic: one processor keeps up with the firehose (~100 msgs/s, ≤3 s behind) where the original consumer fell 173 s behind; **zero of 83,664 records lost** with a processor killed mid-batch; replay capacity 577 msgs/s on one processor, 1,276 on three |
+| Anomaly alerts on live traffic | **28.1 → 3.9 a minute** after a per-partition warm-up and dropping junk NER spans |
+| Filtered vector search | when the HNSW index is walked, a partial index returns all 5 requested rows at 0.978 recall where a table-wide index returns under 3; pgvector 0.8's iterative scan fills the count but not the recall (0.320) |
 | Learned deferral | **negative result** — ties confidence gating, does not beat it |
 
 Full tables, and the scripts that regenerate every figure, in [`docs/results.md`](docs/results.md).
@@ -42,22 +44,27 @@ Two architectural decisions shape everything else:
 │                  Ingestion Layer                    │
 │  Bluesky · Mastodon · HN Firebase · GitHub Events   │
 └────────────────────────┬────────────────────────────┘
-                         │ async producers
+                         │ idempotent producers, keyed by record id
                          ▼
 ┌─────────────────────────────────────────────────────┐
 │                     Kafka                           │
 │   bluesky-raw · mastodon-raw · hn-raw · gh-raw      │
 └────────────────────────┬────────────────────────────┘
-                         │ async consumers
+                         │ consumer group, batches of up to 500
                          ▼
 ┌─────────────────────────────────────────────────────┐
-│            Stream Processing Layer                  │
+│               Processor  (×1–3)                     │
 │   Deduplication → Entity Extraction (spaCy NER)     │
-│   Velocity Scoring → Anomaly Detection              │
-│   (median/MAD · EWMA · z-score baselines)           │
-└────────────────────────┬────────────────────────────┘
-                         │ graph mutations + anomaly events
-                         ▼
+│   one Postgres transaction per batch, then one      │
+│   Kafka transaction: mentions + input offsets       │──► dead-letter
+└──────────┬──────────────────────────┬───────────────┘
+           │ graph writes             │ entity-mentions, keyed by entity
+           │                          ▼
+           │             ┌──────────────────────────────┐
+           │             │  Scorer                      │
+           │             │  event-time velocity → CUSUM │
+           │             └──────────────┬───────────────┘
+           ▼                            ▼ anomaly events
 ┌─────────────────────────────────────────────────────┐
 │              PostgreSQL + pgvector                  │
 │   Propagation graph edges                           │
@@ -68,12 +75,14 @@ Two architectural decisions shape everything else:
             │ (fast path)             │ (durability)
             ▼                         ▼
 ┌─────────────────────────────────────────────────────┐
-│            LlamaIndex ReAct Agent                   │
+│      Tool-calling agent (Groq or local Ollama)      │
+│   get_entity_activity     (who drove a topic)       │
 │   get_propagation_path                              │
 │   search_similar_trends (pgvector)                  │
 │   classify_virality        (graph heuristics)       │
 │   classify_virality_model  (trained LightGBM)       │
-│   confidence gate → case file                       │
+│   submit_verdict → evidence check → confidence gate │
+│   → case file                                       │
 │   Ragas evaluation on every output                  │
 └────────────────────────┬────────────────────────────┘
                          │ REST · WebSocket · SSE
@@ -86,7 +95,7 @@ Two architectural decisions shape everything else:
 └─────────────────────────────────────────────────────┘
 ```
 
-> **What has actually run.** Everything from stream processing down has run on real data: deduplication, spaCy extraction, graph writes, velocity scoring, anomaly detection, the agent, embeddings and the API. **The Kafka hop has not.** Docker was unavailable on the development machine, so `docker-compose.yml` (Kafka + Postgres) has never been brought up. The live capture used `scripts/ingest_live.py`, which runs the real producer serialisation and the real `processing.consumer.handle()` with the broker left out, against the embedded `pgserver` Postgres. The Kafka producers and consumer are written, and the producers' serialisation is unit-tested, but the broker path has not been exercised end to end.
+> **What has actually run.** All of it, on the compose stack: four live producers → Kafka → processor → Postgres, the entity-keyed scorer behind it, the agent, embeddings and the API. Running Kafka for the first time found the compose healthcheck could never pass, the consumer silently dropping records that carried a NUL byte, and velocity scoring that went wrong as soon as a second consumer started — see [Kafka pipeline — end to end](docs/results.md#kafka-pipeline--end-to-end).
 
 Offline, feeding the classifier the agent calls:
 
@@ -109,16 +118,16 @@ ml/evaluate   classifier vs LLM vs hybrid, calibration, review gate
 
 | Technology | Role |
 |---|---|
-| **Kafka** | Event bus between the four producers and the stream processor — written, not yet run end to end (see above) |
+| **Kafka** | Event bus: raw topics per platform, an entity-keyed `entity-mentions` topic for the scorer, and a dead-letter topic; offsets commit transactionally with the mentions |
 | **PostgreSQL** | Source of truth — propagation graph edges, case files, metadata |
 | **pgvector** | Vector search — semantic retrieval of historically similar trends |
 | **LightGBM** | Cascade classifier — the agent's strongest evidence |
-| **LlamaIndex** | Agent orchestration — stateful ReAct loop with tool calling |
+| **LlamaIndex** | Tool definitions; the agent drives native tool calls through the OpenAI-compatible API that Groq and Ollama both serve |
 | **Groq** | LLM inference (primary), when a key serves the configured model |
 | **Ollama** | LLM inference (fallback) — local, zero cost, and the embedding backend (`nomic-embed-text`) |
 | **Ragas** | Retrieval and grounding scores on every case file — wired in but not yet installed, so scores currently record zeros |
 | **FastAPI** | Backend — REST, WebSocket, and SSE endpoints |
-| **Docker** | Kafka and Postgres via `docker compose up` (optional — see below) |
+| **Docker** | Kafka and Postgres via `docker compose up` |
 
 ---
 
@@ -137,7 +146,7 @@ Propagation relationships are stored as directed edges. Degree, spread depth, an
 Historical trend embeddings live in the same Postgres instance as relational data, so similarity search can be joined directly with graph queries.
 
 **Provider-agnostic LLM inference.**
-Groq is preferred, with a local Ollama model behind it. The backend is probed once at startup — the key must work *and* serve the configured model — because a revoked key or a decommissioned model name would otherwise fail every investigation while a working local model sat idle.
+Both backends are driven through the same OpenAI-compatible tool-calling API, so `LLM_BACKEND` picks one without code changes. On `auto`, Groq is preferred and probed once at startup — the key must work *and* serve the configured model — because a revoked key or a decommissioned model name would otherwise fail every investigation while a working local model sat idle. Groq's free tier allows about one investigation a minute, so for live volume the local model is the one that keeps up.
 
 **Evaluation as a first-class concern.**
 The classifier is scored on a temporally held-out split against the LLM agent alone and the two combined. The human-review threshold is read off the reliability curve rather than guessed. Ragas scores retrieval relevance and grounding on each case file — note that these measure the *retrieval*, not confidence calibration, which comes from `ml/evaluate.py`. `ragas` and `datasets` are not in either requirements file yet, so the evaluator currently falls back to zero scores.
@@ -185,15 +194,16 @@ Full tables in [`docs/results.md`](docs/results.md), all regenerated by scripts.
 | What | Measured |
 |---|---|
 | Cascade classifier | held out on 400 unseen cascades: macro F1 0.910, ROC-AUC 0.960, Brier 0.069 (original: 0.889 / 0.938 / 0.086). 14 new features won all 10 paired CV folds (+0.017 ROC-AUC); nested Optuna tuning mostly bought calibration (ECE 0.064 → 0.045) |
-| Classifier vs LLM agent | on the same held-out split the original classifier reached AUC 0.938; the LLM arm sits near chance at 0.571 and the hybrid at 0.359. Both LLM arms rest on fewer than 20 verdicts and should not be ranked against each other |
+| Classifier vs LLM agent | classifier AUC 0.960 on the held-out split. The LLM arms are being re-measured: the old 0.571 / 0.359 came from an agent that never called its tools. First runs of the fixed agent: LLM alone at chance (13 and 9 of 24), with the classifier tool 17 of 21 |
 | Classifier vs GNN | a plain-PyTorch GIN on the reshare trees, fed the same per-post signals, reaches CV ROC-AUC 0.920 against 0.948 for tuned LightGBM, and does not help in an ensemble |
 | Distribution shift | nine perturbed simulators; the upgraded model's ROC-AUC beats the original's on eight of nine, loses on desynchronised campaigns (0.916 vs 0.928), and every model is near chance when every cascade is a confusable subtype |
 | Hardest subtype | `stealth_coordinated` is **not** improved (held-out 0.393 → 0.286, n=28); an oracle reading the simulator's true parameters only reaches 0.56 on it |
 | Anomaly baselines | at matched recall on 150 held-out topics, per-event CUSUM fires 0.08 false alarms per topic-day against 1.35 for median/MAD; under overdispersed chatter every detector degrades, CUSUM least |
-| Filtered vector search | table-wide HNSW returns under 3 of 5 requested rows at 5% selectivity; a partial index returns all 5 |
+| Filtered vector search | on the HNSW path, table-wide returns 2.64 of 5 rows at 5% selectivity, iterative scan 5 of 5 at the same 0.320 recall, a partial index 5 of 5 at 0.978; at benchmark scale pgvector 0.8's planner sidesteps the index and sorts exactly |
 | Review gate | 0.55, read off the reliability curve, not guessed (the upgraded model clears 90% accuracy at every confidence, so the gate is kept as a floor) |
 | Learned deferral | **negative result** — ties confidence gating, does not beat it |
-| Live traffic | real Bluesky and HN ingestion through the production processing path (Kafka bypassed): 103,544 reshare edges, 262,349 nodes; cascade shape compared against the simulator |
+| Live traffic | Bluesky, HN, Mastodon and GitHub through the full Kafka path: 59,834 reshare edges and 172,290 nodes in 14 minutes; cascade shape compared against the simulator |
+| Kafka | zero records lost across a mid-batch processor kill; replaying all 84,957 messages twice left the graph unchanged; full tables in `docs/results.md` |
 
 ---
 
@@ -250,8 +260,14 @@ better gate.
 **A benchmark that measures the generator instead of the problem.**
 The first simulator produced a classifier at F1 0.97 — a number that says the two populations were trivially separable, not that the task was solved. `hop_prob` and `root_attach` had been given non-overlapping ranges per class. Fixed by making every class-conditional parameter range straddle its counterpart, drawing target size from a shared distribution so raw size cannot leak the label, and generating a fraction of each class as a confusable subtype. A test now asserts the overlap so the easy dataset cannot come back.
 
-**Idempotent edge insertion under Kafka redelivery.**
-Kafka guarantees at-least-once delivery, so a consumer crash mid-processing redelivers the same event and duplicates edges. Solved with a composite unique constraint on `(source_id, target_id, platform, ts)` and `ON CONFLICT DO NOTHING` on every edge write.
+**At-least-once delivery, proven rather than assumed.**
+The original consumer auto-committed offsets on a timer, so a record could be marked consumed before its write landed, and a record that failed to write was logged and skipped for good — eleven were, all carrying a NUL byte Postgres refuses. The processor now writes a batch in one transaction and commits the input offsets in the same Kafka transaction as the batch's entity mentions, only after the graph write. A loss audit reads every record back off the topics: zero of 83,664 missing with a processor killed mid-batch. The writes are idempotent — `ON CONFLICT` on the node key and on `(source_id, target_id, platform, ts)` — and replaying all 84,957 messages twice left the graph's node and edge counts unchanged.
+
+**Scoring that broke as soon as it scaled.**
+Velocity was counted inside the consumer, so with three consumers each saw roughly a third of an entity's mentions and judged against a third of its history. Mentions are now re-published to `entity-mentions` keyed by entity id, so every mention of one entity reaches the same scorer, which counts on event time rather than its own clock. A test checks that splitting a stream by entity raises exactly the alerts one scorer would, and that splitting it round-robin does not. The live run then exposed a second problem: a freshly started scorer's windows can only fill, so every count climbs and steady chatter reads as a spike, and the low early counts poison the baseline long after. A per-partition warm-up, plus dropping NER spans that were emoji runs or URLs, took live alerts from 28.1 to 3.9 a minute.
+
+**An agent that never used its tools.**
+The ReAct prompt asked for a bare JSON answer, and every model tested — hosted and local — obeyed by answering immediately, so no tool ever ran: an empty test node came back "coordinated at 0.95". Underneath, every tool advertised its parameters as `args` and `kwargs`, so even a model that tried could not call one correctly. The agent now uses native tool calls through the OpenAI-compatible API, submits its verdict through a tool of its own, and refuses a verdict with no tool result behind it. Anomalies fire on entities, which have no outgoing edges, so the tools also had to learn to look backwards from a topic to the posts and cascades behind it.
 
 ---
 
@@ -260,7 +276,7 @@ Kafka guarantees at-least-once delivery, so a consumer crash mid-processing rede
 ```
 diffusion/
 ├── ingestion/          # one async Kafka producer per platform
-├── processing/         # dedup, spaCy NER extraction, velocity, anomaly baselines
+├── processing/         # processor (dedup, spaCy NER, batched writes), scorer, anomaly baselines
 ├── graph/              # schema, propagation queries, pgvector embeddings
 ├── agent/              # ReAct agent, tools, confidence gate, Ragas evaluation
 ├── api/                # FastAPI app, REST routes, WebSocket, SSE
@@ -278,11 +294,11 @@ diffusion/
 │   ├── predict.py      #   inference for the agent tool
 │   ├── evaluate.py     #   classifier vs LLM vs hybrid, calibration
 │   ├── eval_anomaly.py #   anomaly baseline replay comparison
-│   └── eval_retrieval.py #  filtered vector search recall
+│   ├── eval_retrieval.py # filtered vector search recall
 │   ├── deferral.py     #   learned deferral (negative result, see results.md)
 │   └── analyze_real.py #   live cascade characterisation vs the simulator
 ├── tests/              # pure unit tests, no external services
-├── scripts/            # devdb, seed, live ingestion, e2e validation, benchmark
+├── scripts/            # Kafka lag monitor and loss audit, seed, e2e validation, benchmark
 ├── docs/results.md     # every measured number
 └── docker-compose.yml
 ```
@@ -291,7 +307,7 @@ diffusion/
 
 ## Running Locally
 
-**Prerequisites:** Python 3.11+, and either Docker or nothing at all (see below).
+**Prerequisites:** Python 3.11+ and Docker (for Kafka and Postgres).
 
 ```bash
 git clone https://github.com/825pranav/diffusion
@@ -305,18 +321,17 @@ python -m venv .venv
 python -m spacy download en_core_web_sm
 ```
 
-### Database
-
-Docker is optional. The `pgserver` wheel bundles a self-contained PostgreSQL 16 with pgvector, which is enough to run the real schema:
+### Kafka and Postgres
 
 ```bash
-python -m scripts.devdb start    # starts Postgres, creates the schema,
-                                 # writes DATABASE_URL into .env
+cp .env.example .env
+docker compose up -d     # Kafka (KRaft, no ZooKeeper), Postgres 16 + pgvector 0.8,
+                         # and a one-shot job that creates the six topics
 ```
 
-`devdb` also takes `url`, `stop`, and `reset`. It binds a dynamic port and rewrites `DATABASE_URL`, so `config.DB_URL` works unchanged.
-
-To use the compose stack instead, `docker compose up -d` and set `DATABASE_URL` yourself. Compose is the only way to get Kafka, which the producer → consumer path needs. The compose stack has not yet been run end to end.
+There is no separate migration step: the API, the processor and the scorer each
+create the schema on startup if it is missing, serialised by an advisory lock so
+several starting at once do not race.
 
 ### LLM
 
@@ -332,9 +347,18 @@ The agent probes Groq once and falls back to Ollama if the key is missing, rejec
 ### Run it
 
 ```bash
-uvicorn api.main:app --reload     # API + agent listener + embedding indexer
-python -m processing.consumer     # stream processor (needs Kafka)
-python -m ingestion.hn_producer   # one producer per platform (needs Kafka)
+uvicorn api.main:app              # API + agent listener + embedding indexer
+python -m processing.consumer     # raw topics -> graph; run up to 3 (one per partition)
+python -m processing.scorer       # entity-mentions -> anomaly_events
+python -m ingestion.bluesky_producer
+python -m ingestion.hn_producer
+python -m ingestion.mastodon_producer   # MASTODON_INSTANCE / MASTODON_ACCESS_TOKEN
+python -m ingestion.github_producer     # GITHUB_TOKEN recommended: 60 requests/hour without
+```
+
+```bash
+python -m scripts.measure_kafka --minutes 10 --out run.jsonl   # lag, throughput, latency
+python -m scripts.audit_kafka --since <epoch>                  # every record reached the graph?
 ```
 
 ### The ML pipeline
@@ -355,16 +379,11 @@ python -m ml.deferral                               # learned deferral (negative
 
 ### Live traffic
 
-```bash
-python -m scripts.ingest_live --minutes 20   # real Bluesky + HN into the graph
-python -m ml.analyze_real                    # observed cascades vs the simulator
-```
+With the pipeline above running for a while:
 
-`ingest_live` runs the real producer serialisation and the real
-`consumer.handle()` against Postgres with the Kafka hop omitted, so a live run
-works without Docker. Kafka is the transport; everything else is the production
-path. The broker itself was not part of the live run, so neither Kafka throughput
-nor consumer lag has been measured.
+```bash
+python -m ml.analyze_real    # observed cascades vs the simulator
+```
 
 Each writes its own section of `docs/results.md`.
 

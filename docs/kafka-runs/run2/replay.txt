@@ -1,0 +1,5 @@
+counts before replay {"graph_nodes": 172290, "graph_edges": 174024, "anomaly_events": 426}
+rewound 84957 messages
+replay with 1 processors: 147.3 s, counts after {"graph_nodes": 172290, "graph_edges": 174024, "anomaly_events": 426}
+rewound 84957 messages
+replay with 3 processors: 66.6 s, counts after {"graph_nodes": 172290, "graph_edges": 174024, "anomaly_events": 426}

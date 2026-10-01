@@ -1,26 +1,28 @@
 # Diffusion — where things stand
 
 Working context. Read this first when picking the project back up.
-Last updated 2026-09-26.
+Last updated 2026-10-01.
 
 **What changed:** the project went from an LLM guessing at verdicts to a measured
 ML system — a difficulty-calibrated cascade simulator, a trained and calibrated
-classifier, a derived review gate, and a live ingestion run against real Bluesky
-and Hacker News traffic.
+classifier, a derived review gate — and, as of 2026-10-01, everything runs on
+the real stack: four live producers through Kafka into Postgres, measured for
+lag, capacity and loss, with an agent that now actually calls its tools.
 
 ---
 
 ## Resume in three commands
 
 ```bash
-python -m scripts.devdb start      # embedded Postgres + schema, writes DATABASE_URL
-pytest                             # 145 tests, no services needed
-uvicorn api.main:app --reload      # API + agent listener + embedding indexer
+docker compose up -d               # Kafka + Postgres 16/pgvector 0.8, topics created
+pytest                             # 170 tests, no services needed
+uvicorn api.main:app               # API + agent listener + embedding indexer
 ```
 
-Everything else (`ml.train`, `ml.evaluate`, `scripts.ingest_live`, …) is listed in
-the README under **Running Locally**. The `.venv` is already built and the
-database still holds the simulated dataset *and* the live capture.
+then `python -m processing.consumer`, `python -m processing.scorer` and the four
+`ingestion.*_producer`s. Everything else is listed in the README under
+**Running Locally**. The compose database holds the simulated dataset *and* a
+live capture taken through Kafka.
 
 ---
 
@@ -41,6 +43,8 @@ database still holds the simulated dataset *and* the live capture.
 | 7 | Classifier upgrade | ✅ 14 features, nested Optuna, GIN baseline, shift benchmark, oracle ceiling |
 | 8 | Anomaly upgrade | ✅ Poisson / negative binomial / CUSUM, tuned per event on held-out topics |
 | — | Train/serve skew | ✅ single-cascade scoring now sees its trailing window |
+| 9 | Kafka end to end | ✅ compose stack runs; batched transactional processor, entity-keyed scorer, loss audit |
+| 10 | Agent grounding | ✅ native tool calls, verdicts refused without evidence, topics resolvable |
 
 ---
 
@@ -58,10 +62,14 @@ Full tables in [`docs/results.md`](docs/results.md), all script-generated.
 | Anomaly, per event, 150 held-out topics | CUSUM 0.08 FP/topic-day at recall 0.846 vs median/MAD 1.35 at 0.832 |
 | Review gate | **0.55**, derived — 90.7% accuracy at 96.8% coverage |
 | Anomaly baseline (fixed 2.5, clock ticks) | median/MAD cuts false alarms 3.4× vs z-score (4.99 → 1.48 per topic-day on the 50 topics the DB now replays; the earlier 5.06 → 1.44 was a 40-topic replay) |
-| Filtered vector search | table-wide HNSW returns **2.46 of 5** rows at 5% selectivity; partial index returns 5 |
+| Filtered vector search | on the HNSW path (pgvector 0.8.6): table-wide 2.64 of 5 rows, iterative scan 5 of 5 at the same 0.32 recall, partial index 5 of 5 at **0.978** |
 | Learned deferral | 0.958 vs 0.957 for confidence — **no gain** |
-| Live capture | **103,544 reshare edges**, 262,349 real nodes from Bluesky + HN |
-| Live cascades | 3,000 observed, 980 with 3+ posts, max size 126, max depth 13 |
+| Kafka throughput | one processor keeps up live (~100 msgs/s, ≤3 s behind; old consumer: 63/s, 173 s behind); replay 577 msgs/s, 1,276 on three |
+| Kafka loss | **0 of 83,664** records missing with a processor killed mid-batch (old consumer: 11 lost to NUL bytes) |
+| Kafka idempotence | replaying all 84,957 messages twice left node and edge counts unchanged |
+| Live anomaly alerts | 28.1 → **3.9 a minute** with per-partition warm-up and junk-span filtering |
+| Live capture (through Kafka) | 59,834 reshare edges, 172,290 nodes from Bluesky, HN, Mastodon, GitHub in 14 min |
+| Live cascades | 3,000 observed, 768 with 3+ posts, max size 165, max depth 40 |
 | Backlog sweep | verified on real data — recovered 50 anomalies (batch limit) that `NOTIFY` had dropped |
 
 ---
@@ -106,10 +114,13 @@ feature-indistinguishable from the real thing, and a deferral model reading the
 same features cannot flag what the classifier cannot separate. **The remaining
 gap needs new features, not a better gate.**
 
-**3. The LLM is the weakest link, and the LLM measurement is itself weak.**
-A local 7B reasoning over graph structure lands around chance, far below the
-classifier's 0.938 — so routing a verdict through it costs accuracy, and its
-value is the case file it writes rather than the label it picks. But do not read
+**3. The LLM is the weakest link — and the old LLM numbers measured nothing.**
+(2026-10-01) The agent never called a tool: the prompt's "respond with ONLY
+JSON" beat the ReAct format, and every tool's schema read `args`/`kwargs`. The
+table below was measured on that broken agent and is withdrawn. With the agent
+fixed, local `qwen2.5:7b` alone got 13 and then 9 of 24 right — still chance —
+and with the classifier tool 17 of 21, so its value remains the case file it
+writes rather than the label it picks. The old runs, for the record: But do not read
 the `llm` and `hybrid` rows as a ranking. Three single runs of an unchanged
 configuration produced:
 
@@ -146,34 +157,30 @@ was free.
 
 ## Environment
 
-No Docker, WSL, or system PostgreSQL on this machine, so local development runs
-on an embedded database rather than the compose stack.
+Docker Desktop runs (WSL 2), so everything uses the compose stack; the embedded
+`pgserver` database and the Kafka-bypassing `ingest_live.py` are gone.
 
 | Component | How it runs | Notes |
 |---|---|---|
-| PostgreSQL 16.2 | `pgserver` wheel, embedded | `python -m scripts.devdb start` |
-| pgvector 0.6.2 | bundled | **< 0.8**, so `iterative_scan` is unavailable — hence partial HNSW indexes |
-| LLM (hosted) | Groq `openai/gpt-oss-120b` | key works; free tier 429s under bulk evaluation |
-| LLM (local) | Ollama `qwen2.5:7b` | used for the evaluation arms; weak at ReAct |
+| Kafka 3.6 (Confluent 7.6.1) | compose, KRaft | six topics created by `kafka-init` |
+| PostgreSQL 16 + pgvector 0.8.6 | compose | schema created by whichever service starts first |
+| LLM (hosted) | Groq `openai/gpt-oss-120b` | free tier: 8,000 tokens/min, about one investigation a minute |
+| LLM (local) | Ollama `qwen2.5:7b` | default local model; `qwen3:8b` slower, `llama3.2` wrong too often |
 | Embeddings | Ollama `nomic-embed-text` | 768-dim, matches the schema |
-| Kafka | **not running** | Docker Desktop installed but won't start without a reboot |
 
 ### Dependency notes
 
-- `llama-index-core` pinned at **0.10.52** — 0.14 removes `ReActAgent.from_tools`,
-  which `agent/agent.py` is built on. It declares `numpy<2` but runs fine on the
-  numpy 2 that scipy and lightgbm need; install it *before* restoring numpy. The
-  pip resolver warning is expected.
+- `llama-index-core` pinned at **0.10.52** and now used only for `FunctionTool`;
+  the tool-calling loop uses the `openai` client against Groq's and Ollama's
+  OpenAI-compatible endpoints. It declares `numpy<2` but runs fine on the numpy 2
+  that scipy and lightgbm need; install it *before* restoring numpy. The pip
+  resolver warning is expected.
 - `spacy` on 3.8.x — 3.7.5 has no Python 3.12 wheels.
 
 ---
 
 ## Open items
 
-- [ ] **Reboot to finish Docker Desktop.** It installs but the engine won't
-      start until Windows restarts. Then `docker compose up -d` brings up Kafka
-      (KRaft, no ZooKeeper) and the compose Postgres. The compose file is
-      committed but **has never been run** — that is the one untested piece.
 - [ ] **Groq bulk evaluation is rate-limited.** The key is valid and
       `openai/gpt-oss-120b` answers in ~1.6 s, but one investigation is 4–8 rapid
       calls and the free tier 429s throughout a 40-cascade run. `--llm-delay`
@@ -186,16 +193,14 @@ on an embedded database rather than the compose stack.
       25 live replies: median depth 2, mean 2.8, max 7, with 32% reaching depth
       3 or more, against a flat 1 before. Not yet at the simulator's p50 of 4,
       so the domain gap is narrowed rather than closed.
-- [ ] **Re-run the LLM arms with `--llm-repeats`.** The machinery is committed
-      but the run was killed by the OS memory guard — `llama-server` holds 6.2 GB
-      and a browser was holding ~4 GB more. `docs/results.md` currently shows a
-      single run per arm, whose numbers should be read with the variance caveat
-      in that section. Close a few apps and run
-      `python -m ml.evaluate --llm-sample 12 --llm-repeats 3`.
-- [ ] **Anomalies re-fire on the same entity.** A sustained elevated topic
-      triggers repeatedly with no per-entity cooldown, so one trend can occupy
-      the agent many times over. 278 anomalies fired during a 25-minute capture,
-      most of them repeats of a handful of entities.
+- [ ] **Re-measure the LLM arms on the fixed agent.** Run
+      `python -m ml.evaluate --backends ollama,groq --llm-repeats 3`. The local
+      half takes ~20 minutes; Groq's free tier (8,000 tokens/min) makes its half
+      about an hour, and unload other Ollama models first or they share VRAM.
+- [~] **Anomalies re-fire on the same entity.** The warm-up and span filter
+      cut live alerts from 28.1 to 3.9 a minute, but a sustained topic can still
+      re-fire with no per-entity cooldown, and the local agent takes ~15 s an
+      investigation.
 
 ---
 
@@ -227,8 +232,15 @@ on an embedded database rather than the compose stack.
 
 ## Decision log
 
-- **Embedded Postgres over skipping the DB.** Every measured number needs real
-  SQL; mocking it would have made them meaningless.
+- **Embedded Postgres over skipping the DB** (until 2026-10-01, when the compose
+  stack replaced it). Every measured number needs real SQL; mocking it would have
+  made them meaningless.
+- **Transactional offsets over at-most-once speed.** Input offsets commit in the
+  same Kafka transaction as the batch's entity mentions, after the graph write,
+  so a crash costs a re-read rather than a lost record.
+- **Re-key mentions by entity rather than share scorer state.** Kafka's
+  partitioning puts every mention of one entity on one scorer; the alternative
+  was a shared store on the hot path of every mention.
 - **Temporal, not random, train/test split.** Fit on history, score what comes
   next — and it is the only split that keeps the causal author features honest.
 - **Cascade size is deliberately not a class signal.** Target size is drawn from
@@ -281,3 +293,23 @@ on an embedded database rather than the compose stack.
     frequency made every first-ever cascade look like it had a full history.
 15. English-only NER ran on multilingual firehose text, inventing entities that
     then became the top "trending topics" the anomaly detector fired on.
+16. The compose healthcheck probed `localhost:29092`, a listener bound to the
+    `kafka` hostname, so Kafka never became healthy and the topics were never
+    created. **The compose stack could not have started.**
+17. Nothing on the compose path created the schema; only `devdb` did.
+18. The consumer auto-committed offsets on a timer and skipped records that
+    failed to write: 11 of 86,328 were lost to NUL bytes on the first Kafka run.
+19. Velocity was counted per consumer process, so it was wrong as soon as a
+    second consumer started.
+20. A fresh scorer's filling windows read as spikes in everything, and poisoned
+    the baseline for long after: 28 alerts a minute on live traffic.
+21. Mastodon's default instance (and the one before it) now refuses anonymous
+    public timelines, so the producer published nothing.
+22. `.env.example` subscribed Jetstream to posts only, dropping every repost.
+23. **The agent never called a tool.** The prompt's "respond with ONLY JSON"
+    beat the ReAct format, and every tool's schema read `args`/`kwargs`, so no
+    model could have called one correctly anyway. Verdicts were invented.
+24. `classify_virality` ran two queries at once on one connection and failed on
+    every call.
+25. Anomalies fire on entities, which have no outgoing edges, so every tool
+    returned nothing for a real anomaly.

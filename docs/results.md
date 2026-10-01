@@ -64,36 +64,61 @@ Reproduce with `python -m ml.eval_anomaly`.
 ## Filtered vector search — recall
 
 A 10,000-vector corpus in which the `(model_name, model_version)` filter keeps
-only the stated share of rows. Recall@5 is measured against a sequential scan,
-exact by construction, over 100 queries per row, with `hnsw.ef_search`
-pinned equal across both configurations so the comparison is about the filter and
-not about search effort.
+only the stated share of rows, on pgvector 0.8.6. Recall@5
+is measured against a sequential scan, exact by construction, over 100
+queries per row, with `hnsw.ef_search` pinned equal across configurations so the
+comparison is about the filter and not about search effort.
 
-| filter keeps | shared recall@5 | shared rows | partial recall@5 | partial rows |
-|---|---|---|---|---|
-| 5% | 0.486 | 2.46 / 5 | 0.980 | 5.00 / 5 |
-| 10% | 0.338 | 4.23 / 5 | 0.870 | 5.00 / 5 |
-| 20% | 0.342 | 4.89 / 5 | 0.674 | 5.00 / 5 |
+**What the planner does on its own.**
 
-The table-wide index never returns a full result set: it walks the graph unaware
-of the filter, and neighbours from the other model version are discarded *after*
-consuming the candidate budget. At 5% selectivity a query asking for 5 rows gets
-under 3. Nothing raises an error — `search_similar` simply returns a short,
-degraded list, which is why this survived until it was measured.
+| filter keeps | access path | recall@5 | ms / query |
+|---|---|---|---|
+| 5% | btree + sort (idx_trend_embeddings_model) | 1.000 | 2.07 |
+| 10% | btree + sort (idx_trend_embeddings_model) | 1.000 | 3.24 |
+| 20% | btree + sort (idx_trend_embeddings_model) | 1.000 | 5.44 |
 
-A partial index returns the full 5 rows at every selectivity, because every row
-it contains already satisfies the predicate and the entire walk is usable.
+**When the HNSW index is walked** — forced here by pricing out the sort; a
+table large enough that sorting every filtered row costs more than an index
+walk takes this path unforced.
 
-The table-wide index walks the graph without knowing about the filter, so
-neighbours from the other model version are found first and dropped afterwards.
-Nothing errors — the query just returns fewer and worse rows. A partial index
-contains only rows that already satisfy the predicate, so the entire walk counts.
+| filter keeps | shared recall@5 | shared rows | iterative recall@5 | iterative rows | partial recall@5 | partial rows |
+|---|---|---|---|---|---|---|
+| 5% | 0.314 | 2.64 / 5 | 0.320 | 5.00 / 5 | 0.978 | 5.00 / 5 |
+| 10% | 0.334 | 4.48 / 5 | 0.334 | 5.00 / 5 | 0.882 | 5.00 / 5 |
+| 20% | 0.328 | 4.97 / 5 | 0.328 | 5.00 / 5 | 0.692 | 5.00 / 5 |
 
-pgvector's `iterative_scan` addresses this generally but needs 0.8+; the bundled
-build is 0.6.2. A partial index is sufficient here because the filter is
-low-cardinality and known ahead of time. `graph.embeddings.ensure_partial_index`
-creates one for the active model version, and the background indexer calls it on
+Mean latency per query on the HNSW path, in milliseconds:
+
+| filter keeps | shared | iterative scan | partial |
+|---|---|---|---|
+| 5% | 2.53 | 4.50 | 1.73 |
+| 10% | 2.68 | 3.25 | 1.95 |
+| 20% | 3.03 | 3.36 | 2.59 |
+
+
+Three things follow.
+
+**At this scale the planner avoids the problem on its own.** pgvector 0.8
+prices an HNSW walk against filtering through the `(model_name, model_version)`
+B-tree and sorting what survives, and for a few hundred to two thousand rows the
+exact path wins: full recall in 2–5 ms. On the embedded pgvector 0.6.2 this
+repository ran on before, the same query walked the shared HNSW index and lost
+rows.
+
+**When the index is walked, iterative scan fixes the count, not the answer.**
+`hnsw.iterative_scan` keeps walking the shared graph until enough rows pass the
+filter, so every query comes back with 5 rows — but recall stays where the
+shared index left it (0.320 at 5%), and it is the slowest of the three. The rows
+it adds are whatever the walk reaches next, not the true neighbours.
+
+**The partial index is still the right fix.** Every row in it satisfies the
+filter, so the whole walk counts: 0.978 recall at 5% selectivity, and the
+fastest of the three. Recall falls as the filter keeps more rows because the
+index then holds more candidates at the same `ef_search` — the ordinary HNSW
+trade-off, not a filter problem. `graph.embeddings.ensure_partial_index` creates
+one for the active model version, and the background indexer calls it on
 startup.
+
 
 Reproduce with `python -m ml.eval_retrieval`.
 
@@ -104,9 +129,7 @@ the LLM arms are sampled from it, `n` below).
 
 | arm | n | accuracy | macro F1 | ROC-AUC | Brier |
 |---|---|---|---|---|---|
-| `classifier` | 400 | 0.890 | 0.889 | 0.938 | 0.086 |
-| `llm` | 15 | 0.667 | 0.603 | 0.571 | 0.237 |
-| `hybrid` | 16 | 0.438 | 0.435 | 0.359 | 0.345 |
+| `classifier` | 400 | 0.910 | 0.910 | 0.960 | 0.069 |
 
 ### Per class
 
@@ -116,37 +139,33 @@ positive-class F1 hides.
 
 | arm | class | precision | recall | F1 |
 |---|---|---|---|---|
-| `classifier` | coordinated | 0.906 | 0.859 | 0.882 |
-| `classifier` | organic | 0.877 | 0.919 | 0.897 |
-| `llm` | coordinated | 0.615 | 1.000 | 0.762 |
-| `llm` | organic | 1.000 | 0.286 | 0.444 |
-| `hybrid` | coordinated | 0.429 | 0.375 | 0.400 |
-| `hybrid` | organic | 0.444 | 0.500 | 0.471 |
+| `classifier` | coordinated | 0.923 | 0.885 | 0.904 |
+| `classifier` | organic | 0.899 | 0.933 | 0.915 |
 
 ![reliability diagram](reliability.png)
 
-Investigations that returned no parseable verdict: `llm` 5, `hybrid` 4. They are
+Investigations that returned no parseable verdict: none. They are
 excluded rather than counted as wrong — each arm is measured on the answers it
 actually gives, and the count is reported so the omission stays visible.
 
-**The LLM arms are underpowered and should not be ranked against each other.**
-Each rests on fewer than twenty verdicts, and repeated runs move them further
-than the gap between them: across two runs of the same sample the `llm` arm
-scored ROC-AUC 0.602 and then 0.424, a swing of nearly 0.2 on an arm that never
-touches the classifier and so should not have changed at all. Sampling noise is
-larger than the effect. What the numbers do support is the coarse conclusion —
-a local 7B reasoning over graph structure is somewhere around chance at this
-task, and nowhere near the classifier's 0.938. Separating "LLM alone" from
-"LLM with the model tool" needs a stronger model and a sample in the hundreds,
-which is a rate-limit and runtime problem rather than a design one.
+
+**The LLM rows this section used to carry are withdrawn.** They were measured
+with an agent that never called a tool: the prompt demanded a bare JSON answer,
+which beat the ReAct format, and every tool advertised its parameters as `args`
+and `kwargs`, so the "LLM" arms measured unguided guessing. With the agent fixed,
+two 24-cascade runs of local `qwen2.5:7b` without the classifier tool got 13 and
+then 9 right — chance, so the coarse conclusion stands — and one run with the
+tool got 17 of 21. Groq's free tier (8,000 tokens a minute) did not allow a full
+run. Re-measure both with `python -m ml.evaluate --backends ollama,groq`.
+
 
 ### By cascade subtype
 
 | subtype | n | accuracy |
 |---|---|---|
-| `plain` | 340 | 0.941 |
-| `stealth_coordinated` | 28 | 0.393 |
-| `viral_organic` | 32 | 0.781 |
+| `plain` | 340 | 0.971 |
+| `stealth_coordinated` | 28 | 0.286 |
+| `viral_organic` | 32 | 0.812 |
 
 The simulator generates a fraction of each class as a confusable subtype:
 `viral_organic` cascades that burst like a campaign, and `stealth_coordinated`
@@ -158,9 +177,9 @@ the generator is doing real work rather than decorating the dataset.
 
 `CONFIDENCE_THRESHOLD` was a guessed 0.65. Read off the classifier's reliability
 curve, the lowest gate whose retained predictions reach
-90% accuracy is **0.55**, which holds
-90.7% accuracy while auto-publishing
-96.8% of cases. The remainder goes to a human.
+90% accuracy is **0.50**, which holds
+91.0% accuracy while auto-publishing
+100.0% of cases. The remainder goes to a human.
 
 Lowest rather than safest: every extra point of threshold buys accuracy by
 sending more cases to review, so the cheapest gate that clears the bar is the
@@ -243,50 +262,64 @@ Reproduce with `python -m ml.deferral`.
 
 ## Live traffic — observed cascades
 
-Live Bluesky and Hacker News traffic ingested through the real producer
-serialisation and `processing.consumer.handle()` — dedup, spaCy NER, graph
-writes, velocity scoring and anomaly detection — with Kafka omitted as transport
-(see `scripts/ingest_live.py`).
+Live traffic carried end to end by the production path: platform producers ->
+Kafka -> `processing.consumer` (dedup, spaCy NER, batched graph writes) ->
+`entity-mentions` -> `processing.scorer` (velocity and anomaly detection).
 
 ### What was ingested
 
 | platform | edge type | count |
 |---|---|---|
-| bluesky | `authored` | 133,174 |
-| bluesky | `reshare` | 103,544 |
-| bluesky | `mentions` | 57,875 |
-| hn | `authored` | 353 |
-| hn | `mentions` | 215 |
+| bluesky | `authored` | 82,276 |
+| bluesky | `reshare` | 59,499 |
+| bluesky | `mentions` | 26,159 |
+| github | `pushed` | 1,124 |
+| github | `created` | 162 |
+| github | `watched` | 3 |
+| github | `forked` | 1 |
+| hn | `authored` | 280 |
+| hn | `reshare` | 233 |
+| hn | `mentions` | 187 |
+| mastodon | `mentions` | 1,564 |
+| mastodon | `posted_to` | 1,326 |
+| mastodon | `authored` | 1,108 |
+| mastodon | `reshare` | 102 |
 
 | platform | node type | count |
 |---|---|---|
-| bluesky | `content` | 174,718 |
-| bluesky | `author` | 50,898 |
-| bluesky | `named_entity` | 35,947 |
-| hn | `content` | 353 |
-| hn | `author` | 267 |
-| hn | `named_entity` | 166 |
+| bluesky | `content` | 112,503 |
+| bluesky | `author` | 35,826 |
+| bluesky | `named_entity` | 16,642 |
+| github | `repo` | 1,215 |
+| github | `author` | 1,030 |
+| hn | `content` | 454 |
+| hn | `author` | 231 |
+| hn | `named_entity` | 153 |
+| mastodon | `named_entity` | 1,286 |
+| mastodon | `content` | 1,170 |
+| mastodon | `community` | 1,028 |
+| mastodon | `author` | 752 |
 
 ### Observed cascade shape
 
 | metric | cascades | p50 | p90 | max |
 |---|---|---|---|---|
-| size (posts) | 3,000 | 2 | 5 | 126 |
-| depth | 3,000 | 1 | 2 | 13 |
+| size (posts) | 3,000 | 2 | 4 | 165 |
+| depth | 3,000 | 1 | 1 | 40 |
 
 A firehose is a sample, not an archive: a reply whose parent was never captured
 still forms a two-node tree, so the distribution is dominated by small cascades.
-980 of 3,000 observed cascades reach 3+ posts.
+768 of 3,000 observed cascades reach 3+ posts.
 
 ### Does the simulator resemble reality?
 
 | feature | real p50 | real p90 | simulated p50 | simulated p90 |
 |---|---|---|---|---|
-| `size` | 4.00 | 9.00 | 27.00 | 75.00 |
+| `size` | 3.00 | 9.00 | 27.00 | 75.00 |
 | `max_depth` | 1.00 | 2.00 | 4.00 | 6.00 |
 | `root_fanout_share` | 1.00 | 1.00 | 0.51 | 0.82 |
-| `leaf_frac` | 0.67 | 0.88 | 0.63 | 0.80 |
-| `delay_median_s` | 236.97 | 685.99 | 140.92 | 892.31 |
+| `leaf_frac` | 0.67 | 0.87 | 0.63 | 0.80 |
+| `delay_median_s` | 117.70 | 353.65 | 140.92 | 892.31 |
 
 This is the check on everything trained upstream, and it splits two ways.
 
@@ -304,11 +337,11 @@ where they exist. It is not evidence that real cascades are flat.
 
 | P(coordinated) | cascades | share |
 |---|---|---|
-| 0.0–0.2 | 633 | 64.6% |
-| 0.2–0.4 | 143 | 14.6% |
-| 0.4–0.6 | 114 | 11.6% |
-| 0.6–0.8 | 68 | 6.9% |
-| 0.8–1.0 | 22 | 2.2% |
+| 0.0–0.2 | 433 | 56.4% |
+| 0.2–0.4 | 173 | 22.5% |
+| 0.4–0.6 | 98 | 12.8% |
+| 0.6–0.8 | 50 | 6.5% |
+| 0.8–1.0 | 14 | 1.8% |
 
 Reported as a distribution, not accuracy. Real cascades carry no ground-truth
 label — that absence is precisely why the simulator exists — so what the model
@@ -326,22 +359,22 @@ firehose actually reveals.
 ### One observed propagation
 
 ```
-seed  ·  (not captured)
+seed  ·  I recommend people read this to get a sense of the president's grave cognitive impairment.
   +      0s  depth 1  (repost)
-  +      9s  depth 1  (repost)
-  +     11s  depth 1  (repost)
-  +     12s  depth 1  (repost)
-  +     29s  depth 1  (repost)
-  +     86s  depth 1  (repost)
-  +     89s  depth 1  (repost)
-  +     90s  depth 1  (repost)
-  +    112s  depth 1  (repost)
-  +    118s  depth 1  Just saw it on Labor Day, and I loved it! This movie deserves its crowning achie
-  +    163s  depth 1  (repost)
-  +    163s  depth 1  (repost)
+  +     10s  depth 1  (repost)
+  +     15s  depth 1  4 dementia chess
+  +     17s  depth 1  (repost)
+  +     24s  depth 1  (repost)
+  +     26s  depth 1  (repost)
+  +     27s  depth 1  (repost)
+  +     30s  depth 1  (repost)
+  +     31s  depth 1  (repost)
+  +     32s  depth 1  (repost)
+  +     33s  depth 1  (repost)
+  +     33s  depth 1  (repost)
 ```
 
-Reproduce with `python -m scripts.ingest_live --minutes 20` then
+Reproduce by running the pipeline (README: Run it) for a while, then
 `python -m ml.analyze_real`.
 
 ## Classifier experiments — training-split CV
@@ -742,3 +775,92 @@ database cascades). The batch evaluation numbers were never affected — only
 what the agent saw.
 
 Reproduce with `python -m ml.experiment skew`.
+
+## Kafka pipeline — end to end
+
+The producer → Kafka → processor → graph path, run against live traffic on the
+compose stack (Kafka 3.6 in KRaft mode, Postgres 16, pgvector 0.8.6), first with
+the original consumer and then with the rewritten pipeline. Each run lasted about
+fourteen minutes: seven with one consumer, seven with three, then a drain.
+
+### Keeping up with the stream
+
+| phase | produced | consumed | max lag (msgs) | max behind | lag at end |
+|---|---|---|---|---|---|
+| run 1 — 1 consumer | 106/s | 63/s | 15,810 | 173 s | 15,810 |
+| run 1 — 3 consumers | 102/s | 112/s | 16,097 | 173 s | 11,884 |
+| run 2 — 1 processor | 101/s | 101/s | 117 | 1 s | 16 |
+| run 2 — 3 processors | 101/s | 101/s | 146 | 3 s | 18 |
+
+"Behind" is the age of the oldest message the group has not processed. The
+original consumer managed about 60 records a second against roughly 100
+arriving, so a single instance fell three minutes behind and kept falling;
+three instances only just outran the stream, and draining the backlog took
+115 s after the producers stopped. Each record cost about
+five autocommitted statements, every one waiting on its own WAL flush, while
+spaCy extraction takes 2 ms. The processor writes a batch in one transaction and
+keeps up with one instance; run 2 drained in 7 s.
+
+### Capacity
+
+Rewinding the processor group to the start of run 2 and replaying all
+84,957 messages as fast as the processors take them (wall time, including
+process start-up and group join):
+
+| processors | time | throughput | graph nodes after | graph edges after |
+|---|---|---|---|---|
+| 1 | 147 s | 577 msgs/s | 172,290 | 174,024 |
+| 3 | 67 s | 1,276 msgs/s | 172,290 | 174,024 |
+
+Before either replay the graph held 172,290 nodes and
+174,024 edges. Every message was processed again, twice, and
+neither count moved: the writes are idempotent, which is what makes
+at-least-once delivery safe here.
+
+### Nothing lost
+
+| run | messages | content records | written | missing | dead-lettered |
+|---|---|---|---|---|---|
+| run 1 | 86,332 | 86,328 | 86,317 | 11 | 0 |
+| run 2 | 84,957 | 83,664 | 83,664 | 0 | 0 |
+
+`scripts/audit_kafka.py` reads every record back off the raw topics and checks
+that its content node exists as a real node rather than a placeholder. Run 1's
+eleven missing records each carried a NUL character, which Postgres refuses in
+TEXT and JSONB; the consumer logged the error, skipped the record and committed
+past it. The processor strips NULs, and a record that still cannot be written
+goes to the `dead-letter` topic with its source offset instead of disappearing.
+
+Run 2 lost nothing although one of its three processors was killed with
+`taskkill /F` in the middle of a batch. Lag peaked at 146
+messages (3 s behind) while the group rebalanced; whatever
+the dead process had read but not committed went to a survivor, and the audit's
+zero is the evidence that it was written. Offsets
+are committed inside the same Kafka transaction as the batch's entity mentions,
+and only after the graph write has committed, so a crash re-reads work rather
+than skipping it.
+
+### Anomaly alerts on live traffic
+
+The scorer's alert rate after its first five-minute window, read from the
+monitor's running count of `anomaly_events`:
+
+| run | scorer | alerts / min |
+|---|---|---|
+| run 2 | no warm-up, every NER span | 28.1 |
+| soak | warm-up per partition, implausible spans dropped | 3.9 |
+
+The two runs saw different hours of traffic, so the comparison is indicative.
+A controlled one replayed run 2's own 29,204 mentions through both scorers: the
+warm-up alone took the post-window rate from 28.6 to 8.0 a minute. A fresh
+window can only fill, so every entity's count climbs and steady chatter reads as
+a spike; worse, those low early counts enter the baseline history and keep
+firing alarms well after the window is full. The span filter removes the
+loudest remaining source — 4.5% of extracted entities were emoji runs, URLs or
+spans crossing a line break, and a string of sheep emoji alone raised 39 of
+run 2's alerts.
+
+Reproduce: `docker compose up -d`, start the processor(s), the scorer and the
+producers, sample with `python -m scripts.measure_kafka`, audit with
+`python -m scripts.audit_kafka --since <epoch>`, and rebuild this section with
+`python -m scripts.kafka_report`.

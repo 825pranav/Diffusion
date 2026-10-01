@@ -66,9 +66,6 @@ out/
 npm-debug.log*
 yarn-error.log*
 
-# Claude Code context
-.claude/
-
 # Local session context (do not commit)
 context.txt
 frontend_prompt.md

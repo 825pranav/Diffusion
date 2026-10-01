@@ -1,0 +1,5 @@
+messages on raw topics: 86332
+distinct content records: 86328 (4 duplicate copies)
+written to the graph:     86317
+missing:                  11
+dead-lettered:            0
